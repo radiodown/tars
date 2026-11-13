@@ -4,6 +4,7 @@ import { useWorkspace } from './App';
 import { isLive, time } from './api';
 import { Badge, Markdown } from './ui';
 import './work-approvals.css';
+import { approvalChanges, pendingApprovals } from './approval-state';
 
 const states = { pending: '사용자 확인 대기', approved: '승인됨', feedback: '의견 전달됨', superseded: '새 버전으로 대체' };
 const jobStates = { queued: '담당 AI 실행 대기', running: '담당 AI가 이어서 처리 중', done: '후속 응답 완료', blocked: '후속 실행 실패', cancelled: '후속 실행 중지', superseded: '새 응답으로 대체' };
@@ -15,6 +16,9 @@ function Approval({ item, current, expanded }) {
   const [sending, setSending] = useState(false);
   const commentId = useId();
   const source = data.sessions.find(session => session.id === item.sourceSessionId);
+  const previous = (data.workApprovals || []).filter(other => other.requestId === item.requestId && other.kind === item.kind && other.version < item.version)
+    .sort((a, b) => b.version - a.version)[0];
+  const changes = approvalChanges(previous?.snapshot, item.snapshot);
   const job = (data.workflowJobs || []).find(job => job.id === item.followupJobId);
   const name = id => data.members.find(member => member.id === id)?.name || '이전 담당자';
   const canRespond = current && item.status === 'pending' && source?.status === 'completed';
@@ -27,7 +31,7 @@ function Approval({ item, current, expanded }) {
     setError(''); setSending(true);
     try {
       await perform(`/requests/${item.requestId}/approvals/${item.id}/respond`, 'POST', { decision, comment },
-        decision === 'approve' ? '승인을 기록하고 담당 AI의 후속 실행을 예약했습니다.' : '의견을 저장하고 담당 AI의 후속 실행을 예약했습니다.');
+        decision === 'approve' ? '승인을 기록했습니다. 준비된 작업은 자동 진행합니다.' : '의견을 저장하고 담당 AI의 후속 실행을 예약했습니다.');
       setComment('');
     } catch (issue) { setError(issue.message); }
     finally { setSending(false); }
@@ -38,6 +42,7 @@ function Approval({ item, current, expanded }) {
       {item.restored && <p className="muted">이 기능을 적용하기 전에 저장된 기록입니다. 아래 내용을 확인하고 승인하거나 의견을 남겨주세요.</p>}
       <button type="button" className="text-button" onClick={() => open('sessionDetail', { id: item.sourceSessionId })}>작성한 AI 실행 보기</button>
       <h4>{item.snapshot.title}</h4>
+      {previous && <section aria-label="이전 버전과의 차이"><strong>v{previous.version} 이후 변경</strong>{changes.length ? <ul>{changes.map((change, index) => <li key={index}>{change}</li>)}</ul> : <p className="muted">목표·문서·TASK 변경 없음</p>}</section>}
       <Markdown>{item.content}</Markdown>
       {item.kind === 'plan' && <>
         <details><summary>목표와 작업 범위</summary><Markdown>{item.snapshot.instruction}</Markdown></details>
@@ -50,7 +55,7 @@ function Approval({ item, current, expanded }) {
         {source && isLive(source.status) && <p className="muted">담당 AI가 응답을 마무리하고 있습니다. 종료 후 승인하거나 의견을 보낼 수 있습니다.</p>}
         {!source || (source && !isLive(source.status) && source.status !== 'completed') ? <p className="form-error">원래 AI 응답이 정상 종료되지 않았습니다. 실행 기록을 확인하고 협의안을 다시 요청하세요.</p> : null}
         <div className="action-row"><button type="submit" value="approve" className="button primary" disabled={busy || sending || !canRespond}><Check size={15} />{item.kind === 'plan' ? '승인하고 진행' : item.snapshot.report?.final ? '결과 승인' : '보고 확인'}</button><button type="submit" value="feedback" className="button secondary" disabled={busy || sending || !canGiveFeedback || !comment.trim()}><MessageSquare size={15} />의견 보내고 재협의</button></div>
-        <p className="muted">{item.kind === 'plan' ? '이 버전의 협의안을 승인하면 담당 AI가 이어서 처리합니다.' : item.snapshot.report?.final ? '결과를 승인하면 업무가 완료되고 담당 AI가 확인 답변을 남깁니다.' : '진행·차단 보고의 확인을 기록합니다. 남아 있는 작업은 완료 처리하지 않습니다.'}</p>
+        <p className="muted">{item.kind === 'plan' ? '배정과 완료 기준이 준비된 작업은 승인 즉시 대기열에 등록합니다. 추가 의견이나 미배정 작업이 있으면 담당 AI가 이어서 처리합니다.' : item.snapshot.report?.final ? '결과를 승인하면 업무가 완료됩니다. 확인용 AI 호출은 만들지 않습니다.' : '진행·차단 보고의 확인을 기록합니다. 남아 있는 작업은 완료 처리하지 않습니다.'}</p>
       </form>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {item.response && <section className="approval-user-response"><strong>{item.response.decision === 'approve' ? '사용자 승인' : '사용자 의견'} · {time(item.response.at)}</strong><Markdown>{item.response.comment || '내용 확인 후 승인했습니다.'}</Markdown></section>}
@@ -60,6 +65,15 @@ function Approval({ item, current, expanded }) {
       </div>}
     </div>
   </details>;
+}
+
+export function PendingApprovals({ memberId }) {
+  const { data } = useWorkspace();
+  const items = pendingApprovals(data, memberId);
+  if (!items.length) return null;
+  return <section className="work-approvals" aria-label="사용자 확인 대기"><h3>사용자 확인 대기 · {items.length}건</h3>
+    {items.map(item => <Approval key={item.id} item={item} current expanded />)}
+  </section>;
 }
 
 export function WorkApprovals({ requestId }) {

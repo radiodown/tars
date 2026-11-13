@@ -7,7 +7,7 @@ import { WorkApprovals } from './WorkApprovals';
 import './work-history.css';
 
 const decisions = { accepted: '검토 통과', rework: '보완 요청', blocked: '판단·해결 필요' };
-const stages = { task_review: '팀장 검토', request_report: 'TARS 최종 보고', request_escalation: 'TARS 차단 보고', user_followup: '사용자 응답 후속 처리' };
+const stages = { task_review: '팀장 검토', request_report: '담당 관리자 최종 보고', request_escalation: '담당 관리자 차단 보고', user_followup: '사용자 응답 후속 처리' };
 const states = { queued: '대기', running: '진행 중', done: '처리 완료', blocked: '차단', cancelled: '중지', superseded: '새 결과로 대체' };
 
 export function WorkflowJobs({ jobs }) {

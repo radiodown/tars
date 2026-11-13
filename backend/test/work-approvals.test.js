@@ -105,13 +105,25 @@ test('feedback waits for its original manager and returns as a new approval vers
   assert.equal(store.get('tasks', task.id).status, 'assigned');
 }));
 
-test('plan approval dispatches its manager then queues only the approved tasks', () => fixture(async ({ store, task, request, respond, deliver, calls }) => {
-  const { job } = respond('approve');
-  assert.equal(store.get('tasks', task.id).status, 'assigned');
+test('ready plan approval queues tasks without an AI acknowledgement and remains idempotent', () => fixture(async ({ store, task, request, respond, deliver, calls }) => {
+  assert.equal(respond('approve').job, null);
+  assert.equal(respond('approve').job, null);
+  assert.equal(store.get('tasks', task.id).status, 'queued');
+  await deliver();
+  assert.equal(calls.length, 0);
+  assert.equal(store.get('requests', request.id).pendingApprovalId, null);
+  assert.equal(store.list('workflowJobs').length, 0);
+}));
+
+test('approval with instructions waits for the manager before tasks can run', () => fixture(async ({ store, workflow, request, respond, deliver, calls, task }) => {
+  const { job } = respond('approve', '진행 전에 배정을 확인해줘');
+  assert.equal(job.status, 'queued');
+  store.patch('tasks', task.id, { status: 'queued' });
+  assert.equal(workflow.approvals.canExecute(request.id), false);
+  store.patch('tasks', task.id, { status: 'assigned' });
   await deliver();
   assert.equal(calls.length, 1);
-  assert.equal(store.get('workflowJobs', job.id).status, 'done');
-  assert.equal(store.get('requests', request.id).pendingApprovalId, null);
+  assert.equal(workflow.approvals.canExecute(request.id), true);
   assert.equal(store.get('tasks', task.id).status, 'queued');
 }));
 
@@ -121,18 +133,17 @@ test('a scope change after approval prevents execution and requires a new consul
   assert.throws(() => workflow.queueTask(task.id), /사용자 승인/);
 }));
 
-test('report acceptance closes the work and sends its author an acknowledgement turn', () => fixture(async ({ store, workflow, request, report, deliver, calls }) => {
+test('report acceptance closes work without an acknowledgement turn', () => fixture(async ({ store, workflow, request, report, deliver, calls }) => {
   const approval = report();
-  assert.equal(store.get('requests', request.id).status, 'awaiting_acceptance');
-  const { job } = workflow.approvals.respond(request.id, approval.id, { decision: 'approve', comment: '결과 확인했어' });
+  const response = { decision: 'approve', comment: '결과 확인했어' };
+  assert.equal(workflow.approvals.respond(request.id, approval.id, response).job, null);
+  assert.equal(workflow.approvals.respond(request.id, approval.id, response).job, null);
   await deliver();
   assert.equal(store.get('requests', request.id).status, 'accepted');
   assert.equal(store.get('requests', request.id).acceptedApprovalId, approval.id);
-  assert.equal(calls[0].session.continuationOf, approval.sourceSessionId);
-  assert.equal(calls[0].session.memberId, approval.memberId);
-  assert.equal(store.get('workflowJobs', job.id).status, 'done');
+  assert.equal(calls.length, 0);
   workflow.reconcile();
-  assert.equal(store.list('workflowJobs').length, 1);
+  assert.equal(store.list('workflowJobs').length, 0);
 }));
 
 test('acknowledging a blocked report never marks unfinished work complete', () => fixture(async ({ store, workflow, request, report, deliver, task }) => {
@@ -241,3 +252,43 @@ test('Claude launch resumes the specified provider session instead of the latest
     assert(!args.includes('--continue'));
   } finally { if (previous === undefined) delete process.env.TARS_CLAUDE_BIN; else process.env.TARS_CLAUDE_BIN = previous; }
 });
+
+test('consultation -> registration -> approval -> execution -> review -> owner report -> acceptance', () => fixture(async ({ store, orchestrator, workflow, leader, worker, task, request, approval, doc, source }) => {
+  for (const [kind, item] of [['tasks', task], ['requests', request], ['workApprovals', approval], ['documents', doc], ['sessions', source]]) store.delete(kind, item.id);
+  const calls = [];
+  orchestrator.launchRun = async ({ session, cwd, onSpawn, prompt }) => {
+    calls.push({ kind: session.kind, memberId: session.memberId });
+    assert(!prompt.includes(session.processToken), 'Claude token must not enter the model prompt');
+    onSpawn(null);
+    let structured;
+    if (session.kind === 'plan') structured = { summary: '협의안', agreement: '파일 작성 범위', specification: '결과 파일로 검증',
+      work: { title: '결과 파일 작성', instruction: '파일 작성 후 검토·보고', requestId: null },
+      tasks: [{ title: '파일 작성', description: 'result.txt 작성', acceptance: '결과 파일 확인', assigneeId: worker.id, dependsOn: [] }] };
+    if (session.kind === 'work') {
+      await writeFile(join(cwd, 'result.txt'), 'verified');
+      structured = { summary: '작성 완료', workPerformed: ['파일 작성'], artifacts: [{ path: 'result.txt', description: '결과' }],
+        verification: [{ criterion: '결과 파일 확인', status: 'passed', evidence: '파일 내용 확인' }], remaining: [], followUp: [] };
+    }
+    if (session.kind === 'task_review') structured = { decision: 'accepted', rationale: '파일 확인',
+      checks: [{ criterion: 'C1', status: 'passed', evidence: 'verified 확인' }], reworkInstructions: '', knowledge: [] };
+    return { cancel() {}, promise: Promise.resolve({ output: structured ? JSON.stringify(structured) : '검토된 결과 보고', structured }) };
+  };
+  const settle = () => Promise.all([...orchestrator.active.values()].map(run => run.promise));
+  orchestrator.consult({ leaderId: leader.id, prompt: '결과 파일 작성 협의', projectId: null });
+  await settle();
+  const work = store.list('requests')[0];
+  assert.equal(work.status, 'awaiting_approval');
+  await orchestrator.pump(); await settle();
+  assert.equal(calls.length, 1, 'No worker can launch before approval');
+  workflow.approvals.respond(work.id, work.pendingApprovalId, { decision: 'approve' });
+  for (let i = 0; i < 3; i++) { await orchestrator.pump(); await settle(); }
+  assert.deepEqual(calls.map(call => call.kind), ['plan', 'work', 'task_review', 'request_report']);
+  assert.equal(calls.at(-1).memberId, leader.id);
+  const finished = store.get('requests', work.id);
+  assert.equal(finished.status, 'awaiting_acceptance');
+  assert.equal(store.list('tasks')[0].status, 'done');
+  workflow.approvals.respond(work.id, finished.pendingApprovalId, { decision: 'approve' });
+  await orchestrator.pump(); await settle();
+  assert.equal(store.get('requests', work.id).status, 'accepted');
+  assert.equal(calls.length, 4, 'Acceptance must not consume an AI turn');
+}));

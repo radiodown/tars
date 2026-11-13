@@ -36,16 +36,24 @@ export class WorkApprovals {
     const job = request.followupJobId && this.store.get('workflowJobs', request.followupJobId);
     return job && ['queued', 'running', 'blocked', 'cancelled'].includes(job.status);
   }
-  canExecute(requestId) {
-    if (!requestId) return true;
+  executionBlockReason(requestId) {
+    if (!requestId) return null;
     const request = this.store.require('requests', requestId);
-    if (!request.approvalRequired) return true; // Preserve legacy jobs; never invent historical approval.
+    if (request.paused) return '사용자가 업무 진행을 중지했습니다.';
+    if (request.status === 'accepted') return '사용자 확인이 끝난 업무입니다.';
+    if (!request.approvalRequired) return null; // Preserve legacy jobs; never invent historical approval.
     const approval = request.approvedPlanId && this.store.get('workApprovals', request.approvedPlanId);
-    return !request.pendingApprovalId && !['accepted', 'revision_requested'].includes(request.status) && approval?.status === 'approved'
-      && approval.signature === this.scopeSignature(requestId);
+    if (request.pendingApprovalId) return '협의안 또는 보고서에 대한 사용자 확인을 기다리고 있습니다.';
+    if (request.status === 'revision_requested') return '사용자 의견을 반영한 새 협의안 또는 보고서를 기다리고 있습니다.';
+    if (approval?.status !== 'approved') return '협의안에 대한 사용자 승인이 필요합니다.';
+    if (approval.signature !== this.scopeSignature(requestId)) return '승인 이후 문서 또는 작업 범위가 변경되었습니다. 최신 협의안을 다시 제출하세요.';
+    if (this.pendingFollowup(request)) return '담당 AI의 승인 후속 처리를 기다리고 있습니다.';
+    return null;
   }
+  canExecute(requestId) { return !this.executionBlockReason(requestId); }
   assertExecutable(requestId) {
-    if (!this.canExecute(requestId)) fail('현재 협의안에 대한 사용자 승인이 필요합니다. 업무 흐름에서 승인 또는 의견을 남기세요.');
+    const reason = this.executionBlockReason(requestId);
+    if (reason) fail(`현재 협의안에 대한 사용자 승인 또는 후속 처리가 필요합니다. ${reason}`);
   }
   submitPlan(requestId, sourceSessionId, { force = false } = {}) {
     const request = this.store.require('requests', requestId);
@@ -92,7 +100,7 @@ export class WorkApprovals {
     if (approval.requestId !== requestId) fail('이 업무의 승인 요청이 아닙니다.', 400);
     if (approval.response) {
       if (approval.response.decision === input.decision && approval.response.comment === input.comment) {
-        return { approval, job: this.store.require('workflowJobs', approval.followupJobId) };
+        return { approval, job: approval.followupJobId ? this.store.require('workflowJobs', approval.followupJobId) : null };
       }
       fail('이미 처리한 요청입니다. 최신 협의안 또는 보고서를 확인하세요.');
     }
@@ -105,17 +113,29 @@ export class WorkApprovals {
     if (signature !== approval.signature && input.decision === 'approve') fail('문서 또는 작업 내용이 변경되었습니다. 의견을 보내 최신 협의안·보고서를 요청하세요.');
     const member = this.store.get('members', approval.memberId);
     if (!member || !['leader', 'ceo'].includes(member.role)) fail('원래 담당 AI를 찾을 수 없습니다. 담당 조직을 확인하세요.');
+    // Acknowledgements are state transitions. Invoke the manager only for real
+    // feedback or a plan that still needs assignment/work by the manager.
+    const tasks = this.store.list('tasks').filter(task => task.requestId === requestId);
+    const dispatchable = tasks.length > 0 && tasks.every(task => ['done', 'cancelled'].includes(task.status)
+      || (['draft', 'assigned'].includes(task.status) && task.acceptance?.trim()
+        && this.store.get('members', task.assigneeId)?.role === 'member'
+        && this.store.get('members', task.assigneeId)?.departmentId === task.departmentId));
+    const followup = input.decision === 'feedback' || (approval.kind === 'plan' && (input.comment || !dispatchable));
     return this.store.transaction(() => {
-      const job = this.store.put('workflowJobs', { id: digest(['user_followup', approvalId]), kind: 'user_followup',
-        requestId, approvalId, sourceSessionId: source.id, memberId: member.id, status: 'queued' });
+      const job = followup ? this.store.put('workflowJobs', { id: digest(['user_followup', approvalId]), kind: 'user_followup',
+        requestId, approvalId, sourceSessionId: source.id, memberId: member.id, status: 'queued' }) : null;
       const response = { ...input, actor: 'user', at: now() };
-      const saved = this.store.patch('workApprovals', approvalId, { status: input.decision === 'approve' ? 'approved' : 'feedback', response, followupJobId: job.id });
-      this.store.patch('requests', requestId, { pendingApprovalId: null, paused: false, followupJobId: job.id,
+      const saved = this.store.patch('workApprovals', approvalId, { status: input.decision === 'approve' ? 'approved' : 'feedback', response, followupJobId: job?.id || null });
+      this.store.patch('requests', requestId, { pendingApprovalId: null, paused: false, followupJobId: job?.id || null,
         status: input.decision === 'feedback' ? 'revision_requested' : approval.kind === 'plan' ? 'open'
           : approval.snapshot.report.final ? 'accepted' : 'blocked',
         ...(approval.kind === 'plan' ? { approvedPlanId: input.decision === 'approve' ? approvalId : null } : {}),
         ...(approval.kind === 'report' && approval.snapshot.report.final && input.decision === 'approve' ? { acceptedApprovalId: approvalId, acceptedAt: now() } : {}) });
       this.record(saved, 'user_response', `${input.decision === 'approve' ? '사용자 승인' : '사용자 의견'} · ${input.comment || '내용 확인 후 승인'}`, 'user');
+      if (!followup && approval.kind === 'plan') for (const task of tasks) {
+        if (['draft', 'assigned'].includes(task.status)) this.store.patch('tasks', task.id,
+          { status: 'queued', error: null, automationPaused: false }, { actor });
+      }
       return { approval: saved, job };
     });
   }

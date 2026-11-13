@@ -8,6 +8,9 @@ import { departmentSchema, memberSchema, projectSchema, documentSchema, taskSche
 import { isWorkRequest, sessionBelongsToRequest } from '../../shared/work-requests.mjs';
 import { readTerminal } from './terminal.js';
 import { readSessionActivity } from './session-activity.js';
+import { teamActivitySnapshot, teamActivityQuerySchema } from './team-activity.js';
+import { taskWaitReason } from './execution-status.js';
+import { agentState, agentStateQuerySchema } from './agent-state.js';
 import { knowledgeTree, readKnowledgeFile } from './knowledge.js';
 import { syncShared, syncMember, projectPath, createPatch, integrate } from './workspaces.js';
 import { providers } from './providers.js';
@@ -94,12 +97,19 @@ function validateTask(input, existingId = null) {
 }
 
 app.get('/health', async (request, reply) => reply.code(ready ? 200 : 503).send({ service: 'Tars', status: ready ? 'ok' : 'starting', time: now() }));
+app.get('/api/team-activity', async (request, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  return teamActivitySnapshot(store, teamActivityQuerySchema.parse(request.query));
+});
 app.get('/api/state', async () => {
   const state = store.snapshot();
   state.requests = state.requests.filter(request => isWorkRequest(request, state.tasks))
-    .map(request => ({ ...request, executionAllowed: orchestrator.workflow.approvals.canExecute(request.id) }));
+    .map(request => ({ ...request, executionAllowed: orchestrator.workflow.approvals.canExecute(request.id),
+      executionBlockReason: orchestrator.workflow.approvals.executionBlockReason(request.id) }));
+  state.tasks = state.tasks.map(task => ({ ...task, waitReason: taskWaitReason(store, orchestrator.workflow.approvals, task) }));
   return { ...state, providers: await providers(), ceoOverview: projectOverview(state) };
 });
+app.get('/api/agent-state', async request => agentState(store, agentStateQuerySchema.parse(request.query)));
 app.get('/api/knowledge/tree', async (request, reply) => {
   reply.header('Cache-Control', 'no-store');
   return knowledgeTree(store);

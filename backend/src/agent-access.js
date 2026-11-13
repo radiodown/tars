@@ -5,11 +5,11 @@ import { backendPort } from '../../network.config.mjs';
 export const ACCESS_VERSION = 'full-access-v1';
 export const CODEX_THREAD_ACCESS = { approvalPolicy: 'never', sandbox: 'danger-full-access' };
 export const CODEX_TURN_ACCESS = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } };
-export const TARS_TOOL_NAMES = ['tars_get_state', 'tars_register_work', 'tars_create_department', 'tars_create_member', 'tars_api'];
+export const TARS_TOOL_NAMES = ['tars_get_state', 'tars_get_team_activity', 'tars_register_work', 'tars_create_department', 'tars_create_member', 'tars_api'];
 export const agentApiBase = () => process.env.TARS_AGENT_API_BASE || `http://127.0.0.1:${backendPort}`;
-export function agentMcpConfig() {
+export function agentMcpConfig(executionToken) {
   return { command: process.execPath, args: [fileURLToPath(new URL('./agent-mcp.js', import.meta.url))],
-    env: { TARS_AGENT_API_BASE: agentApiBase() } };
+    env: { TARS_AGENT_API_BASE: agentApiBase(), ...(executionToken ? { TARS_EXECUTION_TOKEN: executionToken } : {}) } };
 }
 export function codexAccessConfig() {
   const mcp = agentMcpConfig();
@@ -21,10 +21,10 @@ export function codexAccessConfig() {
     ...Object.fromEntries(TARS_TOOL_NAMES.map(name => [`mcp_servers.tars.tools.${name}.approval_mode`, 'approve'])),
   };
 }
-export function claudeAccessArgs() {
+export function claudeAccessArgs(executionToken) {
   return ['--permission-mode', 'bypassPermissions', '--tools', 'default',
     '--settings', JSON.stringify({ sandbox: { enabled: false } }),
-    '--mcp-config', JSON.stringify({ mcpServers: { tars: agentMcpConfig() } })];
+    '--mcp-config', JSON.stringify({ mcpServers: { tars: agentMcpConfig(executionToken) } })];
 }
 export function permissionResponse(method, params) {
   if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)) {
@@ -57,4 +57,4 @@ export const LEGACY_DEFAULT_INSTRUCTIONS = '사용자의 요청 범위와 프로
 
 export const agentAccessInstructions = `모든 TARS 에이전트는 같은 최대 실행 권한을 사용합니다. 역할과 세션 종류는 읽기·쓰기·명령 실행·네트워크·도구 사용을 제한하지 않습니다. 요청 범위에 필요한 구현, 검증, 조직 변경과 작업 실행을 수행하세요. 제공 도구의 하위 에이전트도 사용할 수 있습니다. 사용자가 이미 승인한 실행에 같은 승인을 다시 요구하지 마세요. 사용자가 명시한 계획만·수정 금지·승인 후 실행 조건은 그대로 지킵니다. 사용자는 대화로 업무를 지시합니다. 대화마다 업무를 생성하지 마세요. 목표와 범위가 정해지면 CEO·팀장이 tars_register_work로 등록하고, 기존 업무의 후속 협의는 requestId로 연결하세요. 질문과 현황 조회는 대화로 답하세요. CEO·팀장은 사용자에게 작업 등록을 요구하지 말고 요청과 설계 문서, 하위 작업, 검토 결과를 연결하세요. 아직 검토하지 않은 설계나 결과를 완료로 보고하지 마세요. 협의안은 목적·범위·합의·제약·미결·완료 기준을 포함해 작성하고 관리 API로 저장하세요. 최초 협의안과 범위 변경은 사용자 승인이 필요합니다. 승인 전에는 협의·설계·작업 초안 작성만 하고 구현·작업 실행을 시작하지 마세요. 업무 흐름의 승인·의견 응답으로 후속 실행이 예약되므로 기다리는 동안 반복 호출하지 마세요. 결과 보고 후 사용자 확인까지 기다리세요.
 
-TARS 조직·업무 관리 도구: tars_get_state로 최신 조직과 작업을 확인하고, tars_create_department로 부서를, tars_create_member로 팀장·팀원을 실제 등록합니다. 기존 부서와 팀장을 확인해 중복 등록하지 마세요. 계정·모델 ID·추론 깊이는 사용자 설정을 그대로 사용합니다. tars_api로 기존 관리 API를 호출해 프로필·문서·작업을 수정하고 작업을 실행할 수 있습니다. SQLite나 생성된 지침 파일을 직접 편집하지 말고 관리 API를 사용해 검증·문서 버전·상태 갱신을 유지하세요. API 오류를 완료로 보고하지 말고 원인을 알려주세요. 변경 후 tars_get_state로 저장된 결과를 확인하세요.`;
+TARS 조직·업무 관리 도구: tars_get_state로 최신 조직과 작업을 확인하고, tars_create_department로 부서를, tars_create_member로 팀장·팀원을 실제 등록합니다. 기존 부서와 팀장을 확인해 중복 등록하지 마세요. 계정·모델 ID·추론 깊이는 사용자 설정을 그대로 사용합니다. tars_api로 기존 관리 API를 호출해 프로필·문서·작업을 수정하고 작업을 실행할 수 있습니다. SQLite나 생성된 지침 파일을 직접 편집하지 말고 관리 API를 사용해 검증·문서 버전·상태 갱신을 유지하세요. API 오류를 완료로 보고하지 말고 원인을 알려주세요. 변경 응답에 저장된 결과가 포함됩니다. 응답이 없거나 추가 정보가 필요할 때만 tars_get_state의 collection/id로 해당 항목을 조회하세요.`;

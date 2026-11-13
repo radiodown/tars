@@ -11,6 +11,7 @@ import { RequestList } from './TaskWorkflow';
 export { Organization } from './Organization';
 export { Sessions } from './SessionTerminal';
 import { TeamConsole } from './SessionTerminal';
+import { TeamStatus } from './TeamStatus';
 export { Dashboard } from './WorkspaceMonitor';
 
 function Heading({ eyebrow, title, description, action }) {
@@ -37,7 +38,7 @@ export function Tasks() {
 }
 
 export function Consultation() {
-  return <div className="page consultation-page"><Heading title="팀장과 협의" description="팀장 이름을 선택해 이전 협의와 작업 결과를 확인하고 대화를 이어가세요." /><TeamConsole role="leader" /></div>;
+  return <div className="page consultation-page"><Heading title="팀장과 협의" description="팀장 이름을 선택해 이전 협의와 작업 결과를 확인하고 대화를 이어가세요." /><TeamConsole role="leader" sidebar={leader => <TeamStatus key={leader.id} leader={leader} />} /></div>;
 }
 
 export function Library() {

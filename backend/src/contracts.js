@@ -37,8 +37,8 @@ export const settingsSchema = z.object({
   maxConcurrent: z.number().int().min(1).max(8),
   maxSessionMinutes: z.number().int().min(1).max(180),
   maxReworkAttempts: z.number().int().min(0).max(5),
-  menuOrder: z.array(z.enum(['/', '/ceo', '/requests', '/projects', '/organization', '/consult', '/tasks', '/sessions', '/library', '/usage']))
-    .max(10).refine(order => new Set(order).size === order.length, '메뉴 순서에 중복 항목이 있습니다.'),
+  menuOrder: z.array(z.enum(['/', '/inbox', '/ceo', '/requests', '/projects', '/organization', '/consult', '/tasks', '/sessions', '/library', '/usage']))
+    .max(11).refine(order => new Set(order).size === order.length, '메뉴 순서에 중복 항목이 있습니다.'),
 }).partial().strict().refine(value => Object.keys(value).length > 0, '변경할 설정이 필요합니다.');
 export const workRequestSchema = z.object({
   title: text, instruction: z.string().trim().min(1).max(16000),

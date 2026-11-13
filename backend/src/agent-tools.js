@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { departmentSchema, memberSchema, workRequestSchema } from './contracts.js';
 import { agentApiBase } from './agent-access.js';
+import { teamActivitySchema, teamActivityFromState } from './team-activity.js';
+import { agentStateSchema, agentStateFromState } from './agent-state.js';
 
 const executionToken = z.string().min(1).optional().describe('Current execution identity token provided in the TARS prompt; required for writes.');
 
@@ -11,15 +13,17 @@ const requestSchema = z.object({
   executionToken,
 }).strict();
 const definitions = [
-  { name: 'tars_get_state', description: 'Read current TARS departments, agents, projects, tasks, sessions, documents and settings. Read back after mutations to verify the result.',
-    schema: z.object({}).strict(), method: 'GET', path: '/api/state', readOnly: true },
+  { name: 'tars_get_team_activity', description: 'Read a compact, current team activity snapshot: who is doing what, original instruction, latest public progress, session/task/work states, heartbeat freshness, blockers and pending approvals. Includes chats without registered work. Optional departmentId/projectId/memberId filters; limit/offset paginate members. Project filtering includes department staff and assigned work; their actual current project is shown even if different. Read-only; does not create work. Prefer this over full state for status questions.',
+    schema: teamActivitySchema, method: 'GET', path: '/api/team-activity', readOnly: true, query: true },
+  { name: 'tars_get_state', description: 'Read compact TARS lists, default 20 records per collection with totals and limit/offset pagination. Lists omit document bodies, session output and approval snapshots. Specify collection and id to read one complete record. Mutation responses already contain the saved record; query again only for missing details or uncertain results.',
+    schema: agentStateSchema, method: 'GET', path: '/api/agent-state', readOnly: true, query: true },
   { name: 'tars_register_work', description: 'A leader or CEO explicitly registers a business work item after discussing its goal and scope with the user. Provide a meaningful title, instruction (goal and scope), and projectId if applicable. Never register greetings, questions, or status lookups as work. For follow-up on an existing work item, provide its requestId to link this conversation without creating a duplicate. Use the returned ID as requestId for documents, delegated tasks and consultations. Registration enters consultation. Submit agreement/design documents and task drafts first; execution is blocked until the user approves that exact scope in the work UI.',
     schema: workRequestSchema.extend({ executionToken }), method: 'POST', path: '/api/requests' },
   { name: 'tars_create_department', description: 'Create a real TARS department and return its saved ID. Set projectId to assign its default source project, or null for no source project. Check current state first to reuse an existing department.',
     schema: departmentSchema.extend({ executionToken }), method: 'POST', path: '/api/departments' },
   { name: 'tars_create_member', description: 'Register a real TARS AI leader or member in a department. Required: name, departmentId, role (leader/member), provider (codex/claude). Set codexAccount, model, reasoning, specialty and instructions to the requested values. This persists the agent; it does not launch a task.',
     schema: memberSchema.extend({ executionToken }), method: 'POST', path: '/api/members' },
-  { name: 'tars_api', description: 'Call TARS management APIs with the current executionToken. GET /api/state; POST /api/{requests,departments,members,projects,documents,tasks}; PATCH /api/{departments,members,documents,tasks}/<id>; PATCH /api/ceo or /api/settings; POST /api/tasks/<id>/{run,cancel,integrate}; POST /api/consult or /api/report with leaderId and prompt (omitted projectId uses the department default; an explicit projectId or null overrides it); POST /api/sessions/<id>/{stop,steer}; POST /api/requests/<id>/proposal to submit or resubmit the current agreement for user approval. The server automatically submits manager consultation results for approval at turn end. Only the user may respond to approvals. Document PATCH requires its current version. Task creation requires title and departmentId, and accepts description, acceptance, assigneeId, projectId, requestId, dependsOn, documentIds and isolation. Register work with tars_register_work first; tasks and work documents must reference its requestId. Consultations accept requestId to delegate within existing work. Chat messages are not work items. Workers submit structured final results; the server schedules a separate manager review and final TARS report. Only the manager or CEO assigns and starts tasks. Reviews and reports return their final response without mutating state through this API. Read state before updates and after writes; do not replay failed mutations.',
+  { name: 'tars_api', description: 'Call TARS management APIs with the current executionToken. GET /api/agent-state (compact lists; collection/id for details); POST /api/{requests,departments,members,projects,documents,tasks}; PATCH /api/{departments,members,documents,tasks}/<id>; PATCH /api/ceo or /api/settings; POST /api/tasks/<id>/{run,cancel,integrate}; POST /api/consult or /api/report with leaderId and prompt (omitted projectId uses the department default; an explicit projectId or null overrides it); POST /api/sessions/<id>/{stop,steer}; POST /api/requests/<id>/proposal to submit or resubmit the current agreement for user approval. The server automatically submits manager consultation results for approval at turn end. Only the user may respond to approvals. Document PATCH requires its current version. Task creation requires title and departmentId, and accepts description, acceptance, assigneeId, projectId, requestId, dependsOn, documentIds and isolation. Register work with tars_register_work first; tasks and work documents must reference its requestId. Consultations accept requestId to delegate within existing work. Chat messages are not work items. Workers submit structured final results; the server schedules a separate manager review and final TARS report. Only the manager or CEO assigns and starts tasks. Reviews and reports return their final response without mutating state through this API. Use saved mutation responses to verify writes; query details only when needed. Do not replay failed mutations.',
     schema: requestSchema },
 ];
 export const agentTools = definitions.map(({ name, description, schema, readOnly = false }) => ({
@@ -39,6 +43,7 @@ export async function callAgentTool(name, input) {
   if (method !== 'GET' && !token) throw new Error('변경 요청에는 현재 실행의 executionToken이 필요합니다.');
   const base = new URL(agentApiBase());
   const url = new URL(path, base);
+  if (definition.query) for (const [key, value] of Object.entries(payload)) url.searchParams.set(key, String(value));
   if (url.origin !== base.origin || !url.pathname.startsWith('/api/') || url.username || url.password) {
     throw new Error('Use a /api/ path on the configured TARS server.');
   }
@@ -48,6 +53,18 @@ export async function callAgentTool(name, input) {
     headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(token ? { 'X-Tars-Execution-Token': token } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+  // Old servers keep running sessions alive. A new MCP process can still provide
+  // the compact tool until the server is restarted, without touching its DB.
+  if (['tars_get_team_activity', 'tars_get_state'].includes(name) && response.status === 404) {
+    await response.body?.cancel();
+    const fallback = await fetch(new URL('/api/state', base), {
+      redirect: 'error', signal: AbortSignal.timeout(60_000), headers: token ? { 'X-Tars-Execution-Token': token } : {},
+    });
+    if (!fallback.ok) return { content: [{ type: 'text', text: await fallback.text() }], isError: true };
+    const state = await fallback.json();
+    const snapshot = name === 'tars_get_state' ? agentStateFromState(state, payload) : teamActivityFromState(state, payload);
+    return { content: [{ type: 'text', text: JSON.stringify(snapshot) }], isError: false };
+  }
   const content = await response.text();
   return { content: [{ type: 'text', text: content || `HTTP ${response.status}` }], isError: !response.ok };
 }

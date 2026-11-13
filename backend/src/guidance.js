@@ -178,16 +178,35 @@ async function syncSkills(store, member, projectId, cwd) {
   const docs = store.list('documents').filter(doc => doc.kind === 'skill' && appliesTo(doc, member, projectId));
   const id = linksId(cwd);
   let links = store.get('guidanceLinks', id)?.links || [];
-  const wanted = docs.map(doc => ({ path: `.agents/skills/tars-${doc.id}`, target: join(sharedSkills, doc.id) }));
+  const root = await realpath(cwd);
+  const inside = path => { const offset = relative(root, path); return offset && !isAbsolute(offset) && offset !== '..' && !offset.startsWith('../'); };
+  let skillsDirectory;
   for (const path of [join(cwd, '.agents'), join(cwd, '.agents', 'skills')]) {
     const info = await stat(path);
-    if (info && (!info.isDirectory() || info.isSymbolicLink())) fail(`스킬 폴더 연결이 기존 경로와 충돌합니다: ${path}`);
-    await mkdir(path, { recursive: true });
+    if (info) {
+      // Projects may share skills through .agents/skills -> ../.claude/skills.
+      // Follow only existing directories inside this workspace, never a source checkout.
+      let canonical;
+      try { canonical = await realpath(path); }
+      catch (error) {
+        if (!['ENOENT', 'ELOOP', 'ENOTDIR'].includes(error.code)) throw error;
+        fail(`스킬 폴더 연결 대상을 확인할 수 없습니다: ${path} (${error.code}). 끊어진 링크나 순환 링크인지 확인하세요. 기존 경로는 보존했습니다.`);
+      }
+      if (!inside(canonical)) fail(`스킬 폴더 연결이 작업 공간 밖 또는 작업 공간 루트를 가리킵니다: ${path} → ${canonical}. 작업 공간 내부의 스킬 디렉토리를 사용하세요. 기존 경로는 보존했습니다.`);
+      if (!(await lstat(canonical)).isDirectory()) fail(`스킬 폴더 연결 대상이 디렉토리가 아닙니다: ${path} → ${canonical}. 기존 파일은 보존했습니다.`);
+      skillsDirectory = canonical;
+    } else {
+      await mkdir(path);
+      skillsDirectory = await realpath(path);
+    }
   }
+  // Git records the physical path, not files below a directory symlink.
+  const wanted = docs.map(doc => ({ path: relative(root, join(skillsDirectory, `tars-${doc.id}`)), target: join(sharedSkills, doc.id) }));
   for (const existing of links) {
     if (wanted.some(item => item.path === existing.path && item.target === existing.target)) continue;
     const path = join(cwd, existing.path);
     const info = await stat(path);
+    if (info && !inside(await realpath(dirname(path)))) fail(`스킬 폴더 연결이 작업 공간 밖을 가리킵니다: ${path}`);
     if (info && (!info.isSymbolicLink() || resolve(dirname(path), await readlink(path)) !== existing.target)) fail(`변경된 TARS 스킬 연결을 보존했습니다: ${path}`);
     if (info) await rm(path);
     links = links.filter(item => item.path !== existing.path);

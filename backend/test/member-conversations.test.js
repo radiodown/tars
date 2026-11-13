@@ -106,15 +106,25 @@ test('history retains legacy executions across projects and context resets, excl
   orchestrator.resetMemberChat(leader.id);
   const next = await chat(leader);
   assert.notEqual(first.conversationId, next.conversationId);
+  assert(!next.resumeThreadId);
   assert.equal(memberHistory(store, leader.id).length, 3);
-  assert.match(calls.at(-1).prompt, /오래된 합의/);
+  assert(!calls.at(-1).prompt.includes('오래된 합의'));
+  assert(!calls.at(-1).prompt.includes(first.output));
   assert(!calls.at(-1).prompt.includes('다른 AI만의 대화'));
+  const context = await readFile(join(directory, 'conversations', `${leader.id}.md`), 'utf8');
+  assert(!context.includes(first.id));
+  const followup = await chat(leader);
+  assert.equal(followup.resumeThreadId, next.providerSessionId);
+  const updatedContext = await readFile(join(directory, 'conversations', `${leader.id}.md`), 'utf8');
+  assert(updatedContext.includes(next.id));
+  assert(!updatedContext.includes(first.id));
 }));
 
 test('a busy AI rejects another send without creating an extra execution', () => fixture(async ({ store, orchestrator, worker }) => {
   orchestrator.run = async () => {};
   orchestrator.memberChat(worker.id, { prompt: '첫 질문' });
   assert.throws(() => orchestrator.memberChat(worker.id, { prompt: '중복 요청' }), /이미 작업 중/);
+  assert.throws(() => orchestrator.resetMemberChat(worker.id), /진행 중인 작업/);
   assert.equal(memberHistory(store, worker.id).length, 1);
   orchestrator.active.clear();
 }));

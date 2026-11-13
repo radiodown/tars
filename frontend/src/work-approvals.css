@@ -14,3 +14,6 @@
 .approval-continuation .form-error { flex-basis: 100%; }
 .badge.awaiting_approval, .badge.awaiting_acceptance, .badge.revision_requested { color: #f0b44b; }
 .badge.accepted { color: #54bf83; }
+.approval-alert { display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); font-size: 12px; white-space: nowrap; }
+.inbox-page > .panel { padding: 20px; margin-top: 20px; }
+@media (max-width: 700px) { .approval-alert > span { display: none; } }

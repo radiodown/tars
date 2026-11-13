@@ -1,6 +1,7 @@
-import { Boxes, Command, FileText, Gauge, LayoutDashboard, ListTodo, MessageSquare, Route, Users } from 'lucide-react';
+import { Boxes, Command, FileText, Gauge, Inbox, LayoutDashboard, ListTodo, MessageSquare, Route, Users } from 'lucide-react';
 
 export const navigation = [
+  ['/inbox', '확인할 일', Inbox],
   ['/ceo', 'TARS 상황실', Command],
   ['/requests', '업무 흐름', Route],
   ['/', '워크스페이스', LayoutDashboard],

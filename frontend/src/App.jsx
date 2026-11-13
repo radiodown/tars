@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Check, CircleHelp, Moon, Settings, Sun, X } from 'lucide-react';
+import { Activity, Bell, Check, CircleHelp, Moon, Settings, Sun, X } from 'lucide-react';
 import { api } from './api';
 import { Dashboard, Organization, Tasks, Sessions, Consultation, Library, Usage, Preferences } from './pages.jsx';
 import { EntityForm, TaskDetail, SessionDetail } from './forms.jsx';
@@ -10,6 +10,8 @@ import { Projects } from './Projects.jsx';
 import { RequestFlow } from './RequestFlow.jsx';
 import { FloatingCreate } from './FloatingCreate.jsx';
 import { navigation, orderedNavigation } from './navigation';
+import { Inbox } from './Inbox';
+import { pendingApprovals } from './approval-state';
 
 const Workspace = createContext(null);
 export const useWorkspace = () => useContext(Workspace);
@@ -65,6 +67,7 @@ export default function App() {
   const open = (type, initial = {}) => { setMenu(false); setModal({ type, initial }); };
   const fire = (...args) => perform(...args).catch(() => {});
   const data = query.data;
+  const pendingCount = data ? pendingApprovals(data).length : 0;
   const currentTitle = navigation.find(([path]) => path === location.pathname)?.[1] || (location.pathname === '/sessions' ? 'AI와 대화' : '설정');
   return <Workspace.Provider value={{ data, open, perform, fire, busy, notice, close: () => setModal(null) }}>
     <div className="app-shell">
@@ -72,12 +75,13 @@ export default function App() {
         <NavLink to="/ceo" className="brand" aria-label="TARS 홈"><strong className="brand-wordmark">TARS</strong></NavLink>
         <p className="nav-label">WORKSPACE</p>
         <nav aria-label="주 메뉴">
-          {orderedNavigation(data?.settings.menuOrder).map(([path, label, Icon]) => <NavLink end={path === '/'} to={path} key={path} className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}><Icon size={18} strokeWidth={1.7} /><span>{label}</span>{path === '/tasks' && data?.tasks.length > 0 && <small>{data.tasks.filter(t => !['done', 'cancelled'].includes(t.status)).length}</small>}</NavLink>)}
+          {orderedNavigation(data?.settings.menuOrder).map(([path, label, Icon]) => <NavLink end={path === '/'} to={path} key={path} className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}><Icon size={18} strokeWidth={1.7} /><span>{label}</span>{path === '/inbox' && pendingCount > 0 && <small>{pendingCount}</small>}{path === '/tasks' && data?.tasks.length > 0 && <small>{data.tasks.filter(t => !['done', 'cancelled'].includes(t.status)).length}</small>}</NavLink>)}
           <NavLink to="/settings" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}><Settings size={18} strokeWidth={1.7} /><span>설정 및 연결</span></NavLink>
         </nav>
       </aside>
       <div className="main-shell">
         <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <strong>{currentTitle}</strong></div><div className="topbar-actions">
+          {pendingCount > 0 && <NavLink className="approval-alert" to="/inbox" aria-label={`승인 대기 ${pendingCount}건`}><Bell size={15} /><span>승인 대기</span><strong>{pendingCount}</strong></NavLink>}
           <span className={`connection ${connected && !query.isError ? 'online' : ''}`}><span className="status-dot" />{connected && !query.isError ? '실시간 연결' : '연결 확인 중'}</span>
           <button className="icon-button theme-toggle" type="button" title={theme === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} aria-label={theme === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</button>
         </div></header>
@@ -86,11 +90,12 @@ export default function App() {
           <Route path="/ceo" element={<CeoOffice />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/requests" element={<RequestFlow />} />
+          <Route path="/inbox" element={<Inbox />} />
           <Route path="/" element={<Dashboard />} /><Route path="/organization" element={<Organization />} /><Route path="/tasks" element={<Tasks />} /><Route path="/sessions" element={<Sessions />} /><Route path="/consult" element={<Consultation />} /><Route path="/library" element={<Library />} /><Route path="/usage" element={<Usage />} /><Route path="/settings" element={<Preferences />} /><Route path="*" element={<Dashboard />} />
         </Routes>}</main>
       </div>
     </div>
-    {!['/ceo', '/sessions', '/consult'].includes(location.pathname) && <FloatingCreate expanded={menu} onOpenChange={setMenu} onCreate={open} disabled={!data} />}
+    {!['/ceo', '/sessions', '/consult', '/inbox'].includes(location.pathname) && <FloatingCreate expanded={menu} onOpenChange={setMenu} onCreate={open} disabled={!data} />}
     {notice && <div className={`toast ${notice.error ? 'error' : ''}`} role={notice.error ? 'alert' : 'status'}>{notice.error ? <CircleHelp size={19} /> : <Check size={19} />}<span>{notice.message}</span><button aria-label="알림 닫기" onClick={() => setNotice(null)}><X size={16} /></button></div>}
     {modal && data && (modal.type === 'ceoSettings' ? <CeoSettings /> : modal.type === 'taskDetail' ? <TaskDetail taskId={modal.initial.id} /> : modal.type === 'sessionDetail' ? <SessionDetail sessionId={modal.initial.id} /> : <EntityForm key={`${modal.type}-${modal.initial.id || 'new'}`} type={modal.type} initial={modal.initial} />)}
   </Workspace.Provider>;

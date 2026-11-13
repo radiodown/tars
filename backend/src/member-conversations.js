@@ -12,7 +12,11 @@ export function memberHistory(store, memberId, excludeId = null) {
 
 export async function memberConversationContext(store, session, { previous, resumed = false } = {}) {
   const member = store.require('members', session.memberId);
-  const history = memberHistory(store, member.id, session.id);
+  let history = memberHistory(store, member.id, session.id);
+  if (member.chatConversationId && session.conversationId === member.chatConversationId) {
+    const start = history.findIndex(item => isMemberChat(item) && item.conversationId === session.conversationId);
+    history = start < 0 ? [] : history.slice(start);
+  }
   const directory = join(DATA, 'conversations');
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${member.id}.md`);

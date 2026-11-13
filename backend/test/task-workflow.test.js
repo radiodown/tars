@@ -257,7 +257,8 @@ test('full orchestrator advances worker -> review -> request report, with no liv
   const calls = [];
   const orchestrator = new Orchestrator(store, { launchRun: async ({ session, onSpawn, prompt }) => {
     calls.push(session.kind);
-    assert(prompt.includes(session.processToken));
+    assert(!prompt.includes(session.processToken));
+    if (session.kind === 'request_report') assert.equal(session.memberId, store.get('requests', task.requestId).createdBy);
     onSpawn(null);
     const structured = session.kind === 'work' ? result() : session.kind === 'task_review' ? verdict() : null;
     return { cancel() {}, promise: Promise.resolve({ output: structured ? JSON.stringify(structured) : '요청의 결과와 검증 근거를 보고합니다.', structured }) };

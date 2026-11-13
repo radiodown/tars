@@ -5,6 +5,7 @@ import { canSteer, isLive, providerLabel, time } from './api';
 import { Badge } from './ui';
 import { StreamingMarkdown, useConversationScroll } from './StreamingMarkdown';
 import { SessionActivity } from './SessionActivity';
+import { PendingApprovals } from './WorkApprovals';
 
 export function MemberChat({ member }) {
   const { data, open, perform, busy } = useWorkspace();
@@ -43,11 +44,15 @@ export function MemberChat({ member }) {
     const message = (input ?? prompt).trim();
     if (!message || sending.current || busy) return;
     if (message === '/help') { setHelp(value => !value); if (input == null) setPrompt(''); return; }
-    if (message !== '/stop' && unavailable) return;
+    if (message !== '/stop' && message !== '/clear' && unavailable) return;
     sending.current = true;
     setError('');
     try {
-      if (message === '/stop') {
+      if (message === '/clear') {
+        if (current || member.status === 'running') throw new Error('진행 중인 응답이나 작업을 중지하거나 끝난 뒤 새 대화를 시작하세요.');
+        await perform(`/members/${member.id}/chat/clear`, 'POST', {}, `${member.name}의 대화 문맥을 초기화했습니다. 이전 기록은 보존됩니다.`);
+        setHelp(false);
+      } else if (message === '/stop') {
         if (!current) throw new Error('진행 중인 응답이 없습니다.');
         await perform(`/sessions/${current.id}/stop`, 'POST', {}, `${member.name}의 응답 중지를 요청했습니다.`);
       } else if (steering) {
@@ -62,7 +67,7 @@ export function MemberChat({ member }) {
   }
   return <section className="ceo-chat member-chat" aria-label={`${member.name}와 대화`}>
     <header className="ceo-chat-header"><MessageSquare size={21} /><div><h2>{member.name} <Badge status={member.status} /></h2><p>{providerLabel(member)} · {member.model || 'CLI 기본 모델'}</p></div><button className="icon-button" type="button" aria-label={`${member.name} 모델 및 지침 설정`} disabled={member.status === 'running'} onClick={() => member.role === 'ceo' ? open('ceoSettings') : open('member', member)}><Settings2 size={17} /></button></header>
-    <div className="ceo-chat-scope">{member.role === 'ceo' ? <label>소스 범위<select aria-label={`${member.name} 소스 범위`} value={projectId} onChange={event => setProjectId(event.target.value)}><option value="">지정하지 않음</option>{data.projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label> : <span>{department?.name} · {member.role === 'leader' ? '팀장' : '팀원'}{sourceProject ? ` · ${sourceProject.name}` : ''}</span>}</div>
+    <div className="ceo-chat-scope">{member.role === 'ceo' ? <label>소스 범위<select aria-label={`${member.name} 소스 범위`} value={projectId} onChange={event => setProjectId(event.target.value)}><option value="">지정하지 않음</option>{data.projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label> : <span>{department?.name} · {member.role === 'leader' ? '팀장' : '팀원'}{sourceProject ? ` · ${sourceProject.name}` : ''}</span>}<button type="button" className="text-button" disabled={busy || Boolean(current) || member.status === 'running'} title="이전 기록을 보존하고 대화 문맥을 초기화합니다. 진행 중인 응답이나 작업이 끝난 뒤 사용할 수 있습니다." onClick={event => send(event, '/clear')}>새 대화</button></div>
     <div className="ceo-chat-history">
       <div className="ceo-chat-messages" ref={viewport} tabIndex={0} aria-label={`${member.name} 대화 기록`} {...scrollHandlers} onScroll={event => { scrollHandlers.onScroll(event); if (!follow && event.target === event.currentTarget && event.currentTarget.scrollTop < 60) older(); }}>
         <div className="ceo-chat-message-list" ref={content}>
@@ -82,17 +87,18 @@ export function MemberChat({ member }) {
               </article>
             </div>;
           })}
+          <PendingApprovals memberId={member.id} />
         </div>
       </div>
       {!follow && <button className="ceo-chat-follow" type="button" onClick={() => setFollow(true)}>최신 대화로 이동 ↓</button>}
     </div>
     <form className="ceo-chat-composer" onSubmit={send}>
       <textarea aria-label={`${member.name}에게 보낼 메시지`} aria-describedby={hintId} rows={3} maxLength={16000} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={`${member.name}에게 메시지 보내기…`} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); event.currentTarget.form.requestSubmit(); } }} />
-      {help && <p className="ceo-chat-feedback">Enter 전송 · Shift+Enter 줄바꿈 · /stop 응답 중지 · /help 도움말. 위로 스크롤하면 이전 대화가 이어서 표시됩니다.</p>}
+      {help && <p className="ceo-chat-feedback">Enter 전송 · Shift+Enter 줄바꿈 · /clear 새 대화(이전 기록 보존) · /stop 응답 중지 · /help 도움말. 위로 스크롤하면 이전 대화가 이어서 표시됩니다.</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       <footer><span id={hintId}>{steering ? '응답 중에도 추가 지시를 보낼 수 있습니다.' : current ? `${member.name}의 응답을 기다리고 있습니다.` : atCapacity ? '동시 실행 한도에 도달했습니다.' : 'Enter 전송 · Shift+Enter 줄바꿈'}</span><div className="ceo-chat-send-actions">
         {current && <button type="button" className="button secondary" disabled={busy || current.status === 'stopping'} onClick={event => send(event, '/stop')}><Square size={13} />중지</button>}
-        <button className="button primary" type="submit" disabled={(prompt.trim() === '/help' || prompt.trim() === '/stop' ? busy : unavailable) || !prompt.trim()}><Send size={15} />{steering ? '추가 지시' : '보내기'}</button>
+        <button className="button primary" type="submit" disabled={(['/help', '/stop', '/clear'].includes(prompt.trim()) ? busy : unavailable) || !prompt.trim()}><Send size={15} />{steering ? '추가 지시' : '보내기'}</button>
       </div></footer>
     </form>
   </section>;

@@ -87,6 +87,12 @@ export class TaskWorkflow {
     return this.store.list('members').find(member => member.role === 'leader' && member.departmentId === task.departmentId && member.id !== task.assigneeId)
       || this.store.list('members').find(member => member.role === 'ceo' && member.id !== task.assigneeId);
   }
+  reporter(request) {
+    const owner = request.createdBy && this.store.get('members', request.createdBy);
+    if (owner && ['leader', 'ceo'].includes(owner.role)) return owner;
+    return this.store.list('members').find(member => member.role === 'leader' && member.departmentId === request.departmentId)
+      || this.store.list('members').find(member => member.role === 'ceo');
+  }
   job(kind, key, values) {
     const jobId = digest([kind, key]);
     return this.store.get('workflowJobs', jobId) || this.store.put('workflowJobs', { id: jobId, kind, status: 'queued', ...values });
@@ -228,7 +234,7 @@ export class TaskWorkflow {
       const signature = digest(tasks);
       const kind = completed ? 'request_report' : 'request_escalation';
       this.job(kind, [request.id, signature], { requestId: request.id, signature, snapshot: tasks,
-        memberId: this.store.list('members').find(member => member.role === 'ceo')?.id || null });
+        memberId: this.reporter(request)?.id || null });
     }
   }
   finishRequest(jobId, session, content) {

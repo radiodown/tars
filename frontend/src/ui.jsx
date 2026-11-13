@@ -16,7 +16,7 @@ export function Empty({ title, description, action, label = '시작하기', comp
     <h3>{title}</h3><p>{description}</p>{action && <button className="button secondary" onClick={action}>{label}<ArrowUpRight size={15} /></button>}</div>;
 }
 export function Markdown({ children }) { return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children || ''}</ReactMarkdown></div>; }
-export function Dialog({ title, subtitle, children, onClose, wide = false, drawer = false }) {
+export function Dialog({ title, subtitle, children, onClose, wide = false, drawer = false, className = '' }) {
   const ref = useRef(null);
   useEffect(() => {
     const element = ref.current;
@@ -25,7 +25,7 @@ export function Dialog({ title, subtitle, children, onClose, wide = false, drawe
     element.addEventListener('cancel', close);
     return () => { element.removeEventListener('cancel', close); element.close(); };
   }, []);
-  return <dialog ref={ref} className={`${wide ? 'wide' : ''} ${drawer ? 'drawer' : ''}`} aria-labelledby="dialog-title" onClick={event => { if (event.target === ref.current) onClose(); }}>
+  return <dialog ref={ref} className={`${wide ? 'wide' : ''} ${drawer ? 'drawer' : ''} ${className}`} aria-labelledby="dialog-title" onClick={event => { if (event.target === ref.current) onClose(); }}>
     <header className="dialog-head"><div><h2 id="dialog-title">{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" aria-label="닫기" onClick={onClose}><X size={20} /></button></header>
     <div className="dialog-body">{children}</div>
   </dialog>;

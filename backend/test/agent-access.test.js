@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DEFAULT_INSTRUCTIONS, LEGACY_DEFAULT_INSTRUCTIONS, agentMcpConfig } from '../src/agent-access.js';
+import { DEFAULT_INSTRUCTIONS, LEGACY_DEFAULT_INSTRUCTIONS, agentMcpConfig, claudeAccessArgs } from '../src/agent-access.js';
 import { appServerTransport } from '../src/app-server-transport.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -93,6 +93,7 @@ test('MCP registers real agents through the API and preserves validation, genera
     assert(initialized.capabilities.tools);
     const tools = (await rpc('tools/list')).tools;
     assert(tools.some(tool => tool.name === 'tars_create_member'));
+    assert.equal(tools.find(tool => tool.name === 'tars_get_team_activity')?.annotations.readOnlyHint, true);
     const call = (name, args = {}) => rpc('tools/call', { name, arguments: args });
     const value = result => { assert.equal(result.isError, false, JSON.stringify(result)); return JSON.parse(result.content[0].text); };
     const department = value(await call('tars_create_department', { name: 'NGIPS 개발팀' }));
@@ -120,13 +121,25 @@ test('MCP registers real agents through the API and preserves validation, genera
     const rejected = await call('tars_api', { method: 'POST', path: `/api/tasks/${task.id}/complete`, body: {} });
     assert.equal(rejected.isError, true, 'Full tool access must retain task state validation');
     const state = value(await call('tars_get_state'));
+    const activity = value(await call('tars_get_team_activity', { departmentId: department.id }));
+    assert.equal(activity.source, 'team-activity');
+    assert.equal(activity.coverage.returnedMembers, 2);
+    assert.equal(activity.members.find(item => item.id === worker.id).taskCounts.assigned, 1);
+    assert.equal(value(await call('tars_get_team_activity', { memberId: atlas.id })).members[0].name, '아틀라스');
+    assert.equal((await call('tars_get_team_activity', { limit: 0 })).isError, true);
+    assert.equal((await fetch(`${base}/api/team-activity?limit=101`)).status, 400);
+    const httpActivity = await fetch(`${base}/api/team-activity?limit=1&offset=1`);
+    assert.equal(httpActivity.headers.get('cache-control'), 'no-store');
+    assert.equal((await httpActivity.json()).coverage.returnedMembers, 1);
     assert.equal(state.members.length, 3);
     assert.equal(state.tasks.length, 1);
     assert.equal(state.requests.length, 1);
-    const upgraded = state.documents.find(doc => doc.content === DEFAULT_INSTRUCTIONS);
+    assert(state.documents.every(doc => doc.content === undefined));
+    const details = await Promise.all(state.documents.map(doc => call('tars_get_state', { collection: 'documents', id: doc.id }).then(result => value(result).item)));
+    const upgraded = details.find(doc => doc.content === DEFAULT_INSTRUCTIONS);
     assert.equal(upgraded.version, 2);
     assert.equal(upgraded.revisions[0].content, LEGACY_DEFAULT_INSTRUCTIONS);
-    assert(state.documents.some(doc => doc.content === '사용자가 편집한 지침' && doc.version === 1));
+    assert(details.some(doc => doc.content === '사용자가 편집한 지침' && doc.version === 1));
     const revised = value(await call('tars_api', { method: 'PATCH', path: `/api/documents/${upgraded.id}`,
       body: { version: 2, content: `${DEFAULT_INSTRUCTIONS}\n테스트 추가 규칙` } }));
     assert.equal(revised.version, 3);
@@ -202,4 +215,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(replies[3].error.code, -32601);
     assert.deepEqual(requests.map(item => item.granted), [true, true, true, false]);
   } finally { await rpc.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('Claude MCP receives a per-session execution token without changing shared Codex config', () => {
+  const args = claudeAccessArgs('session-only-token');
+  const config = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
+  assert.equal(config.mcpServers.tars.env.TARS_EXECUTION_TOKEN, 'session-only-token');
+  assert.equal(agentMcpConfig().env.TARS_EXECUTION_TOKEN, undefined);
 });

@@ -50,7 +50,7 @@ export async function launch({ session, member, cwd, prompt, minutes, onEvent, o
   await mkdir(directory, { recursive: true });
   const terminal = createTerminalRecorder(directory);
   terminal.write('SESSION', `${member.name} · ${command} · ${member.model || 'CLI 기본 모델'}\n작업 디렉토리: ${cwd}`);
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', ...claudeAccessArgs()];
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', ...claudeAccessArgs(session.processToken)];
   if (session.resumeClaudeId) args.push('--resume', session.resumeClaudeId);
   if (member.model) args.push('--model', member.model);
   if (member.reasoning && member.reasoning !== 'default') args.push('--effort', member.reasoning);

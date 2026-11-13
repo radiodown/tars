@@ -84,18 +84,19 @@ export function SessionTerminal({ session, visible = true }) {
   </section>;
 }
 
-export function TeamConsole({ compact = false, initialSessionId = '', initialMemberId = '', role, visible = true }) {
+export function TeamConsole({ compact = false, initialSessionId = '', initialMemberId = '', role, visible = true, sidebar }) {
   const { data } = useWorkspace();
   const initial = data.sessions.find(session => session.id === initialSessionId);
   const [memberId, setMemberId] = useState(initialMemberId || initial?.memberId || '');
   const members = data.members.filter(member => (!compact || member.role !== 'ceo') && (!role || member.role === role))
     .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
   const member = members.find(item => item.id === memberId) || members[0];
-  return <section className={`team-console ${compact ? 'compact' : ''}`}>
+  const console = <section className={`team-console ${compact ? 'compact' : ''}`}>
     <div className="console-heading"><h2><Terminal size={17} />AI와 대화</h2>{compact && <Link to="/sessions" aria-label="전체 AI 대화"><ArrowUpRight size={16} /></Link>}</div>
     <div className="console-members" aria-label="대화할 AI 이름">{members.map(item => <button key={item.id} type="button" aria-pressed={member?.id === item.id} onClick={() => setMemberId(item.id)}><i className={item.status === 'running' ? 'active' : ''} /><span>{item.name}</span><small>{item.role === 'ceo' ? 'CEO' : item.role === 'leader' ? '팀장' : '팀원'}</small></button>)}</div>
     {member && visible ? <MemberChat key={member.id} member={member} /> : <div className="console-empty"><Empty compact title="대화할 AI가 없습니다" description="조직 관리에서 팀장이나 팀원을 추가하세요." /></div>}
   </section>;
+  return sidebar ? <div className="consultation-layout">{console}{member && sidebar(member)}</div> : console;
 }
 
 export function Sessions() {
