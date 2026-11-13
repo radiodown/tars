@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""Tars server console. Linux / Python 3, no third-party dependencies."""
+
+import argparse
+from collections import deque
+from contextlib import contextmanager
+import fcntl
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import termios
+import time
+import tty
+import urllib.error
+import urllib.request
+import urllib.parse
+import uuid
+from scripts.console_ui import Console, clean
+
+
+ROOT = Path(__file__).resolve().parent
+RUNTIME = ROOT / ".tars-run"
+SERVICES = ("backend", "frontend")
+COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ and not os.environ.get("TARS_PLAIN") and os.environ.get("TERM") != "dumb"
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def paint(value, color):
+    return f"\033[{color}m{value}\033[0m" if COLOR else str(value)
+
+
+def safe_text(value):
+    return clean(value)
+
+
+def config():
+    data = json.loads((ROOT / "run.config.json").read_text())
+    for name in SERVICES:
+        item = data[name]
+        if not isinstance(item["directory"], str):
+            raise ValueError(f"{name}: directory must be a string")
+        command = item["command"]
+        if not isinstance(command, list) or not command or not all(
+            isinstance(part, str) and part for part in command
+        ):
+            raise ValueError(f"{name}: command must be a nonempty string array")
+        if not isinstance(item.get("url", ""), str):
+            raise ValueError(f"{name}: url must be a string")
+        if not isinstance(item.get("listen", ""), str):
+            raise ValueError(f"{name}: listen must be a string")
+    return data
+
+
+@contextmanager
+def locked():
+    RUNTIME.mkdir(mode=0o700, exist_ok=True)
+    with (RUNTIME / "control.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another Tars command is changing server state.")
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def state_path(name):
+    return RUNTIME / f"{name}.json"
+
+
+def read_state(name):
+    path = state_path(name)
+    if not path.exists():
+        return None
+    state = json.loads(path.read_text())
+    if (
+        not isinstance(state.get("pgid"), int) or state["pgid"] <= 1
+        or not isinstance(state.get("token"), str) or not state["token"]
+        or not isinstance(state.get("started"), (float, int))
+    ):
+        raise ValueError(f"Invalid state file: {path}")
+    return state
+
+
+def owned_processes(state):
+    """Require the saved group AND an inherited random token, not PID alone."""
+    if not state:
+        return []
+    marker = f"TARS_RUN_TOKEN={state['token']}".encode()
+    result = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if stat[0] == "Z" or int(stat[2]) != state["pgid"]:
+                continue
+            if marker in (entry / "environ").read_bytes().split(b"\0"):
+                result.append(int(entry.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    return result
+
+
+def preflight(name, settings):
+    item = settings[name]
+    directory = ROOT / item["directory"]
+    if not directory.is_dir():
+        raise RuntimeError(f"{name}: directory missing: {directory}")
+    executable = item["command"][0]
+    if "/" in executable:
+        available = os.access(directory / executable, os.X_OK)
+    else:
+        available = shutil.which(executable) is not None
+    if not available:
+        raise RuntimeError(f"{name}: executable not found: {executable}")
+    if item["command"][:3] == ["npm", "run", "dev"]:
+        manifest = directory / "package.json"
+        if not manifest.is_file():
+            raise RuntimeError(f"{name}: package.json missing; implement the server first.")
+        if not json.loads(manifest.read_text()).get("scripts", {}).get("dev"):
+            raise RuntimeError(f"{name}: package.json has no dev script.")
+        if not (ROOT / "node_modules").is_dir() and not (directory / "node_modules").is_dir():
+            raise RuntimeError("Dependencies missing. Run npm install --ignore-scripts in the Tars directory first.")
+
+
+def start(name, settings):
+    if owned_processes(read_state(name)):
+        return f"{name}: 이미 실행 중입니다."
+    item = settings[name]
+    token = uuid.uuid4().hex
+    with (RUNTIME / f"{name}.log").open("ab", buffering=0) as output:
+        output.write(f"\n--- Tars start: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        process = subprocess.Popen(
+            item["command"], cwd=ROOT / item["directory"],
+            env={**os.environ, "TARS_RUN_TOKEN": token},
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    state = {"pgid": process.pid, "token": token, "started": time.time()}
+    temporary = state_path(name).with_suffix(".tmp")
+    try:
+        temporary.write_text(json.dumps(state))
+        temporary.replace(state_path(name))
+    except BaseException:
+        if owned_processes(state):
+            os.killpg(process.pid, signal.SIGTERM)
+        raise
+    # Retain children so the interactive console can reap exited processes.
+    CHILDREN.append(process)
+    return f"{name}: 시작 요청 완료 · PID {process.pid} · HTTP 상태와 로그를 확인하세요."
+
+
+def stop(name):
+    state = read_state(name)
+    if not owned_processes(state):
+        return f"{name}: 실행 중인 관리 대상이 없습니다."
+    try:
+        os.killpg(state["pgid"], signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 8
+    while owned_processes(state) and time.monotonic() < deadline:
+        time.sleep(0.15)
+    if owned_processes(state):
+        try:
+            os.killpg(state["pgid"], signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 2
+        while owned_processes(state) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    if owned_processes(state):
+        raise RuntimeError(f"{name}: could not stop all managed processes; state retained")
+    state_path(name).unlink(missing_ok=True)
+    return f"{name}: 중지 완료"
+
+
+def http_status(url):
+    if not url:
+        return "not configured"
+    try:
+        with OPENER.open(url, timeout=0.4) as response:
+            return f"HTTP {response.status}"
+    except urllib.error.HTTPError as error:
+        return f"HTTP {error.code}"
+    except (OSError, ValueError, urllib.error.URLError):
+        return "no response"
+
+
+def primary_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            # Resolve the outbound interface without sending a datagram.
+            connection.connect(("10.255.255.255", 1))
+            return connection.getsockname()[0]
+    except OSError:
+        return socket.gethostname()
+
+
+def recent_logs(name, limit=25):
+    path = RUNTIME / f"{name}.log"
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            offset = max(0, handle.tell() - 65536)
+            handle.seek(offset)
+            if offset:
+                handle.readline()
+            lines = handle.read().decode("utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return []
+    return list(deque((clean(line) for line in lines if clean(line).strip()), maxlen=limit))
+
+
+def collect(settings):
+    for process in CHILDREN[:]:
+        if process.poll() is not None:
+            CHILDREN.remove(process)
+    network = primary_ip()
+    result = {"services": [], "logs": [], "network": network}
+    for name in SERVICES:
+        state = read_state(name)
+        pids = owned_processes(state)
+        directory_exists = (ROOT / settings[name]["directory"]).is_dir()
+        label = "RUNNING" if pids else ("EXITED" if state else "STOPPED")
+        if not pids and not directory_exists:
+            label = "NOT CONFIGURED"
+        elapsed = max(0, int(time.time() - state["started"])) if pids else 0
+        uptime = f"{elapsed // 3600:02}:{elapsed // 60 % 60:02}:{elapsed % 60:02}"
+        url = settings[name].get("url", "")
+        parsed = urllib.parse.urlsplit(url)
+        network_url = urllib.parse.urlunsplit((parsed.scheme, f"{network}:{parsed.port}" if parsed.port else network, parsed.path, parsed.query, "")) if url else "—"
+        result["services"].append({
+            "name": name, "label": label, "pids": pids,
+            "pid": str(state["pgid"] if state["pgid"] in pids else min(pids)) if pids else "—", "uptime": uptime,
+            "listen": settings[name].get("listen", "—"), "network_url": network_url,
+            "url": url, "http": http_status(url) if pids else "—",
+        })
+        for line in recent_logs(name):
+            error = any(word in line.lower() for word in ("error", "failed", "traceback"))
+            try:
+                entry = json.loads(line)
+                if isinstance(entry, dict) and isinstance(entry.get("msg"), str):
+                    line = entry["msg"]
+                    request = entry.get("req") or {}
+                    response = entry.get("res") or {}
+                    if isinstance(request, dict) and request.get("url"):
+                        line += f" · {request.get('method', '')} {request['url']}"
+                    if isinstance(response, dict) and response.get("statusCode"):
+                        line += f" · HTTP {response['statusCode']}"
+                    error = isinstance(entry.get("level"), (int, float)) and entry["level"] >= 50
+            except (ValueError, TypeError):
+                pass
+            result["logs"].append({"service": name, "tag": "WEB" if name == "frontend" else "API", "text": line, "error": error})
+    return result
+
+
+def render(settings):
+    snapshot = collect(settings)
+    print(paint("Tars / SERVER CONTROL", "1;36"))
+    for service in snapshot["services"]:
+        print(f"\n  {service['name']}: {service['label']}   PID {service['pid']}   {service['uptime']}")
+        print(f"  Listen: {service['listen']}   Probe: {service['http']}")
+        print(f"  Network: {service['network_url']}")
+        print(f"  Local: {service['url']}")
+        print(f"  Log: {RUNTIME / (service['name'] + '.log')}")
+    print("\n  HTTP 응답과 프로세스 상태는 별도로 표시합니다.")
+
+
+def logs(names):
+    for name in names:
+        print(paint(f"\n── {name} / recent logs ──", "36"))
+        lines = recent_logs(name)
+        if not lines:
+            print("  No log yet.")
+            continue
+        print("\n".join(lines))
+
+
+def execute(action, target, settings):
+    names = list(SERVICES) if target == "all" else [target]
+    if action == "logs":
+        logs(names)
+        return ""
+    if action == "status":
+        render(settings)
+        return ""
+    messages = []
+    with locked():
+        if action in ("start", "restart"):
+            for name in names:
+                if action == "restart" or not owned_processes(read_state(name)):
+                    preflight(name, settings)
+        if action in ("stop", "restart"):
+            for name in reversed(names):
+                messages.append(stop(name))
+        if action in ("start", "restart"):
+            for name in names:
+                messages.append(start(name, settings))
+    return " | ".join(messages)
+
+
+def interactive(settings):
+    original = termios.tcgetattr(sys.stdin.fileno())
+    previous_signal = signal.getsignal(signal.SIGTERM)
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, interrupt)
+        tty.setcbreak(sys.stdin.fileno())
+        with Console(lambda: collect(settings)) as console:
+            interactive_loop(settings, console)
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original)
+        signal.signal(signal.SIGTERM, previous_signal)
+
+
+def interactive_loop(settings, console):
+    aliases = {"1": "start", "2": "stop", "3": "restart", "4": "logs", "5": "status"}
+    history = []
+    history_index = 0
+    escape = ""
+    while True:
+        console.draw()
+        if not select.select([sys.stdin], [], [], 0.1)[0]:
+            if escape == "\x1b":
+                escape = ""
+            continue
+        char = os.read(sys.stdin.fileno(), 1)
+        if not char or char == b"\x04":
+            return
+        if char == b"\x1b":
+            escape = "\x1b"
+            continue
+        if escape:
+            escape += char.decode("ascii", errors="ignore")
+            if escape in ("\x1b[A", "\x1b[B"):
+                history_index = max(0, min(len(history), history_index + (-1 if escape.endswith("A") else 1)))
+                console.pending = history[history_index] if history_index < len(history) else ""
+            if char.isalpha() or char == b"~" or len(escape) > 8:
+                escape = ""
+            continue
+        if char in (b"\x7f", b"\x08"):
+            console.pending = console.pending[:-1]
+            continue
+        if char == b"\x15":
+            console.pending = ""
+            continue
+        if char not in (b"\r", b"\n"):
+            if b" " <= char <= b"~" and len(console.pending) < 160:
+                console.pending += char.decode("ascii")
+            continue
+        line, console.pending = console.pending.strip(), ""
+        if not line:
+            continue
+        history = (history + [line])[-30:]
+        history_index = len(history)
+        parts = line.lstrip("/").split()
+        if not parts:
+            continue
+        action = aliases.get(parts[0], parts[0])
+        target = parts[1] if len(parts) == 2 else "all"
+        if action in ("q", "quit", "exit") and len(parts) == 1:
+            return
+        if action in ("help", "?"):
+            console.page = "help"
+            console.message("/status 로 상태 화면 복귀 · ↑ / ↓ 이전 명령 · Ctrl+U 입력 지우기")
+            continue
+        if len(parts) > 2 or action not in ACTIONS or target not in (*SERVICES, "all"):
+            console.message("/start · /stop · /restart · /logs [backend|frontend] · /help", error=True)
+            continue
+        if action == "status":
+            console.page = "dashboard"
+            console.message("서버 상태는 2초마다 갱신됩니다. HTTP 응답과 실행 여부를 따로 확인하세요.")
+            continue
+        if action == "logs":
+            console.page, console.log_target = "logs", target
+            console.message("최근 로그를 표시합니다. /status 로 기본 화면에 돌아갑니다.")
+            continue
+        verb = {"start": "시작", "stop": "중지", "restart": "재시작"}[action]
+        console.perform(f"{target} 서버 {verb} 중…", lambda action=action, target=target: execute(action, target, settings))
+
+
+CHILDREN = []
+ACTIONS = ("start", "stop", "restart", "status", "logs")
+
+
+def main():
+    global COLOR
+    parser = argparse.ArgumentParser(description="Tars interactive server console")
+    parser.add_argument("action", nargs="?", choices=ACTIONS)
+    parser.add_argument("target", nargs="?", choices=(*SERVICES, "all"), default="all")
+    parser.add_argument("--plain", action="store_true", help="ANSI 화면 없이 상태 또는 명령 결과 표시")
+    args = parser.parse_args()
+    plain = args.plain or bool(os.environ.get("TARS_PLAIN"))
+    if plain:
+        COLOR = False
+    if not sys.platform.startswith("linux"):
+        parser.error("This console requires Linux /proc.")
+    settings = config()
+    if args.action:
+        message = execute(args.action, args.target, settings)
+        if message:
+            print(message)
+    elif not plain and sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
+        interactive(settings)
+    else:
+        render(settings)
+        print("\n명령: ./run start|stop|restart|status|logs [backend|frontend]")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print("\nTars console closed. Use ./run status to inspect servers.")
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+        print(f"Tars: {safe_text(error)}", file=sys.stderr)
+        sys.exit(1)

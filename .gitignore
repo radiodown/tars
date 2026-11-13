@@ -1,0 +1,6 @@
+.tars-run/
+.tars-data/
+node_modules/
+frontend/dist/
+.env
+.env.*
