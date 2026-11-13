@@ -183,6 +183,27 @@ def stop(name):
     return f"{name}: 중지 완료"
 
 
+def rebuild(name, settings):
+    directory = ROOT / settings[name]["directory"]
+    manifest = directory / "package.json"
+    if not manifest.is_file():
+        raise RuntimeError(f"{name}: package.json missing: {manifest}")
+    if not json.loads(manifest.read_text()).get("scripts", {}).get("build"):
+        return f"{name}: build 스크립트가 없어 리빌드 생략"
+    if shutil.which("npm") is None:
+        raise RuntimeError(f"{name}: executable not found: npm")
+    log_path = RUNTIME / f"{name}.log"
+    with log_path.open("ab", buffering=0) as output:
+        output.write(f"\n--- Tars rebuild: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        result = subprocess.run(
+            ["npm", "run", "build"], cwd=directory,
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(f"{name}: 리빌드 실패 · 종료 코드 {result.returncode} · 로그: {log_path}")
+    return f"{name}: 리빌드 완료 · 로그: {log_path}"
+
+
 def http_status(url):
     if not url:
         return "not configured"
@@ -295,6 +316,8 @@ def execute(action, target, settings):
         return ""
     messages = []
     with locked():
+        if action == "rebuild":
+            return " | ".join(rebuild(name, settings) for name in names)
         if action in ("start", "restart"):
             for name in names:
                 if action == "restart" or not owned_processes(read_state(name)):
@@ -324,7 +347,7 @@ def interactive(settings):
 
 
 def interactive_loop(settings, console):
-    aliases = {"1": "start", "2": "stop", "3": "restart", "4": "logs", "5": "status"}
+    aliases = {"1": "start", "2": "stop", "3": "restart", "4": "logs", "5": "status", "6": "rebuild"}
     history = []
     history_index = 0
     escape = ""
@@ -375,7 +398,7 @@ def interactive_loop(settings, console):
             console.message("/status 로 상태 화면 복귀 · ↑ / ↓ 이전 명령 · Ctrl+U 입력 지우기")
             continue
         if len(parts) > 2 or action not in ACTIONS or target not in (*SERVICES, "all"):
-            console.message("/start · /stop · /restart · /logs [backend|frontend] · /help", error=True)
+            console.message("/start · /stop · /restart · /rebuild · /logs [backend|frontend] · /help", error=True)
             continue
         if action == "status":
             console.page = "dashboard"
@@ -385,12 +408,12 @@ def interactive_loop(settings, console):
             console.page, console.log_target = "logs", target
             console.message("최근 로그를 표시합니다. /status 로 기본 화면에 돌아갑니다.")
             continue
-        verb = {"start": "시작", "stop": "중지", "restart": "재시작"}[action]
+        verb = {"start": "시작", "stop": "중지", "restart": "재시작", "rebuild": "리빌드"}[action]
         console.perform(f"{target} 서버 {verb} 중…", lambda action=action, target=target: execute(action, target, settings))
 
 
 CHILDREN = []
-ACTIONS = ("start", "stop", "restart", "status", "logs")
+ACTIONS = ("start", "stop", "restart", "rebuild", "status", "logs")
 
 
 def main():
@@ -414,7 +437,7 @@ def main():
         interactive(settings)
     else:
         render(settings)
-        print("\n명령: ./run start|stop|restart|status|logs [backend|frontend]")
+        print("\n명령: ./run start|stop|restart|rebuild|status|logs [backend|frontend]")
 
 
 if __name__ == "__main__":

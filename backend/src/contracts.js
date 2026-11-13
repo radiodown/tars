@@ -3,11 +3,15 @@ import { z } from 'zod';
 const text = z.string().trim().min(1).max(200);
 const optionalText = z.string().max(20000).default('');
 const reference = z.string().uuid();
+// Codex advertises effort names per model; retain those values independently of model IDs.
+const reasoning = z.string().trim().min(1).max(32).regex(/^[a-z][a-z0-9_-]*$/);
+export const codexAccountSchema = z.enum(['codex', 'codex2']);
 export const departmentSchema = z.object({ name: text, description: optionalText });
 export const memberSchema = z.object({
   name: text, departmentId: reference, role: z.enum(['leader', 'member']),
   provider: z.enum(['codex', 'claude']), model: z.string().trim().max(100).default(''),
-  reasoning: z.enum(['default', 'low', 'medium', 'high']).default('default'),
+  codexAccount: codexAccountSchema.default('codex'),
+  reasoning: reasoning.default('default'),
   specialty: z.string().max(500).default(''), instructions: optionalText,
 });
 export const projectSchema = z.object({ name: text, path: z.string().trim().min(1).max(2000), description: optionalText });
@@ -15,7 +19,10 @@ export const documentSchema = z.object({
   title: text, kind: z.enum(['agreement', 'specification', 'report', 'instruction', 'skill', 'note']),
   content: z.string().max(100000), projectId: reference.nullable().default(null),
   departmentId: reference.nullable().default(null),
-});
+  instructionMode: z.enum(['always', 'on_demand']).default('on_demand'),
+  readWhen: z.string().trim().max(500).default(''),
+}).refine(doc => doc.kind !== 'instruction' || doc.instructionMode !== 'on_demand' || doc.readWhen.length > 0,
+  { message: '필요할 때 읽는 지침에는 적용 조건을 입력하세요.', path: ['readWhen'] });
 export const taskSchema = z.object({
   title: text, description: optionalText, acceptance: optionalText,
   departmentId: reference, projectId: reference.nullable().default(null),
@@ -25,8 +32,26 @@ export const taskSchema = z.object({
   documentIds: z.array(reference).max(10).default([]),
   isolation: z.enum(['worktree', 'copy', 'personal']).default('worktree'),
 });
-export const settingsSchema = z.object({ maxConcurrent: z.number().int().min(1).max(8), maxSessionMinutes: z.number().int().min(1).max(180) });
+export const settingsSchema = z.object({
+  maxConcurrent: z.number().int().min(1).max(8),
+  maxSessionMinutes: z.number().int().min(1).max(180),
+  menuOrder: z.array(z.enum(['/', '/ceo', '/projects', '/organization', '/consult', '/tasks', '/sessions', '/library', '/usage']))
+    .max(9).refine(order => new Set(order).size === order.length, '메뉴 순서에 중복 항목이 있습니다.'),
+}).partial().strict().refine(value => Object.keys(value).length > 0, '변경할 설정이 필요합니다.');
 export const consultationSchema = z.object({ leaderId: reference, projectId: reference.nullable().default(null), prompt: z.string().trim().min(1).max(16000) });
+export const ceoSettingsSchema = z.object({
+  provider: z.enum(['codex', 'claude']), model: z.string().trim().max(100),
+  codexAccount: codexAccountSchema,
+  reasoning, instructions: z.string().max(20000),
+}).partial().strict();
+export const ceoReportSchema = z.object({
+  projectId: reference.nullable().default(null),
+  prompt: z.string().trim().min(1).max(16000).default('현재 프로젝트들의 진행 상황, 차단 사항과 다음 우선순위를 정리해주세요.'),
+}).strict();
+export const ceoChatSchema = z.object({
+  projectId: reference.nullable().default(null),
+  prompt: z.string().trim().min(1).max(16000),
+}).strict();
 export const planSchema = z.object({
   summary: z.string().min(1).max(8000), agreement: z.string().min(1).max(24000), specification: z.string().min(1).max(24000),
   tasks: z.array(z.object({

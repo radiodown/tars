@@ -1,0 +1,30 @@
+.work-record, .work-history, .task-execution-history { margin: 18px 0; padding: 14px; border: 1px solid var(--line); border-radius: 4px; min-width: 0; }
+.work-record > header, .work-history > header, .task-execution-history > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.work-record h3, .work-history h3, .task-execution-history h3 { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.work-record header a { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink); }
+.work-record dl { display: grid; gap: 7px; font-size: 11px; }
+.work-record dl > div { display: flex; flex-wrap: wrap; gap: 7px 12px; }
+.work-record dt { min-width: 105px; color: var(--muted); }
+.work-record dd { margin: 0; overflow-wrap: anywhere; }
+.work-record details { margin-top: 13px; padding-top: 10px; border-top: 1px solid var(--line); }
+.work-record summary, .work-history summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
+.work-record .markdown { font-size: 12px; margin-top: 10px; overflow-wrap: anywhere; }
+.work-record .markdown pre { overflow: auto; }
+.work-record h4 { font-size: 11px; margin: 12px 0 7px; }
+.work-record-note { font-size: 10px; color: var(--muted); margin-top: 13px; line-height: 1.7; }
+.work-history > header > span, .task-execution-history > header > span { font-size: 10px; color: var(--muted); }
+.work-history ol { list-style: none; padding: 0; margin: 0; max-height: 440px; overflow-y: auto; scrollbar-width: thin; }
+.work-history li { padding: 12px 0; border-top: 1px solid var(--line); }
+.history-event-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px; font-size: 11px; }
+.history-event-meta time, .work-history li > small { color: var(--muted); font-size: 10px; }
+.history-status-change { display: flex; align-items: center; gap: 7px; margin-top: 6px; }
+.work-history li > p, .history-instruction { font-size: 11px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.work-history pre { max-height: 240px; overflow: auto; padding: 8px; background: var(--canvas); font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-history footer { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.task-execution-history .work-history { padding: 0; border: 0; margin-bottom: 0; }
+.execution-attempts { display: grid; gap: 6px; margin-bottom: 10px; }
+.execution-attempts > button { display: flex; align-items: center; gap: 10px; padding: 10px; background: var(--raised, transparent); color: var(--ink); border: 1px solid var(--line); border-radius: 3px; text-align: left; }
+.execution-attempts > button > span:first-child { flex: 1; min-width: 0; }
+.execution-attempts strong { font-size: 11px; overflow-wrap: anywhere; }
+.execution-attempts small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.monitor-timing .activity-stale { color: var(--danger, #ef777b); }

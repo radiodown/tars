@@ -3,10 +3,16 @@ import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Store, DATA, now } from './store.js';
-import { departmentSchema, memberSchema, projectSchema, documentSchema, taskSchema, settingsSchema, consultationSchema, fail } from './contracts.js';
+import { departmentSchema, memberSchema, projectSchema, documentSchema, taskSchema, settingsSchema, consultationSchema, ceoSettingsSchema, ceoReportSchema, ceoChatSchema, codexAccountSchema, fail } from './contracts.js';
+import { readTerminal } from './terminal.js';
+import { knowledgeTree, readKnowledgeFile } from './knowledge.js';
 import { syncShared, syncMember, projectPath, createPatch, integrate } from './workspaces.js';
 import { providers } from './providers.js';
+import { accountUsage, closeAccountUsage } from './account-usage.js';
+import { modelCatalog, closeModelCatalog } from './model-catalog.js';
 import { Orchestrator } from './orchestrator.js';
+import { CEO_ID, ensureCeo, projectOverview } from './ceo.js';
+import { managementSnapshot, recordPath } from './work-records.js';
 import { allowedHosts, backendPort, bindHost } from '../../network.config.mjs';
 
 const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
@@ -41,9 +47,10 @@ async function operation(key, fn) {
 }
 
 function validateMember(input, existingId = null) {
+  if (input.name.toUpperCase() === 'TARS') fail('TARS는 고정 CEO의 이름입니다. 다른 이름을 사용하세요.', 400);
   store.require('departments', input.departmentId);
   if (input.role === 'leader' && store.list('members').some(m => m.id !== existingId && m.departmentId === input.departmentId && m.role === 'leader')) fail('이 부서에는 이미 팀장이 있습니다.');
-  const assigned = store.list('tasks').filter(t => t.assigneeId === existingId && !['done', 'cancelled'].includes(t.status));
+  const assigned = existingId ? store.list('tasks').filter(t => t.assigneeId === existingId && !['done', 'cancelled'].includes(t.status)) : [];
   if (assigned.some(t => input.departmentId !== t.departmentId || input.role !== 'member')) fail('담당 작업을 정리한 뒤 소속 또는 역할을 변경하세요.');
 }
 
@@ -73,7 +80,28 @@ function validateTask(input, existingId = null) {
 }
 
 app.get('/health', async (request, reply) => reply.code(ready ? 200 : 503).send({ service: 'Tars', status: ready ? 'ok' : 'starting', time: now() }));
-app.get('/api/state', async () => ({ ...store.snapshot(), providers: await providers() }));
+app.get('/api/state', async () => {
+  const state = store.snapshot();
+  return { ...state, providers: await providers(), ceoOverview: projectOverview(state) };
+});
+app.get('/api/knowledge/tree', async (request, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  return knowledgeTree(store);
+});
+app.get('/api/knowledge/file/:id', async (request, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  return readKnowledgeFile(store, request.params.id);
+});
+app.get('/api/account-usage', async (request, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  return accountUsage();
+});
+app.get('/api/models/:provider', async (request, reply) => {
+  const provider = z.enum(['codex', 'claude']).parse(request.params.provider);
+  const account = codexAccountSchema.default('codex').parse(request.query.account);
+  reply.header('Cache-Control', 'no-store');
+  return modelCatalog(provider, account);
+});
 app.get('/api/events', (request, reply) => {
   reply.hijack();
   reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -94,12 +122,15 @@ store.on('change', () => {
 app.post('/api/departments', async request => {
   const input = departmentSchema.parse(request.body);
   const value = store.put('departments', input);
+  await syncShared(store);
   store.event(`부서 생성 · ${value.name}`);
   return value;
 });
 app.patch('/api/departments/:id', async request => {
   const input = departmentSchema.parse({ ...store.require('departments', request.params.id), ...request.body });
-  return store.patch('departments', request.params.id, input);
+  const value = store.patch('departments', request.params.id, input);
+  await syncShared(store);
+  return value;
 });
 app.post('/api/members', async request => {
   const input = memberSchema.parse(request.body);
@@ -111,6 +142,7 @@ app.post('/api/members', async request => {
 });
 app.patch('/api/members/:id', async request => {
   const existing = store.require('members', request.params.id);
+  if (existing.id === CEO_ID || existing.role === 'ceo') fail('TARS의 이름과 CEO 역할은 고정입니다. TARS 설정에서 모델과 지침을 변경하세요.', 400);
   if (existing.status === 'running') fail('진행 중인 세션을 중지한 뒤 프로필을 변경하세요.');
   const input = memberSchema.parse({ ...existing, ...request.body });
   validateMember(input, existing.id);
@@ -135,10 +167,11 @@ app.post('/api/documents', async request => {
 app.patch('/api/documents/:id', async request => {
   const existing = store.require('documents', request.params.id);
   if (request.body?.version !== existing.version) fail('다른 변경이 저장되었습니다. 문서를 다시 열어 확인하세요.');
-  const input = documentSchema.parse({ ...existing, ...request.body });
+  const input = documentSchema.parse({ ...existing, instructionMode: existing.instructionMode || 'always', ...request.body });
   if (input.kind !== existing.kind) fail('문서 종류는 변경할 수 없습니다.', 400);
   validateDocument(input);
-  const revisions = [...existing.revisions, { version: existing.version, content: existing.content, title: existing.title, savedAt: existing.updatedAt }];
+  const revisions = [...existing.revisions, { version: existing.version, content: existing.content, title: existing.title,
+    instructionMode: existing.instructionMode || 'always', readWhen: existing.readWhen || '', savedAt: existing.updatedAt }];
   const value = store.patch('documents', existing.id, { ...input, version: existing.version + 1, revisions });
   await syncShared(store);
   return value;
@@ -148,7 +181,7 @@ app.post('/api/tasks', async request => {
   const input = taskSchema.parse(request.body);
   if (!input.projectId) input.isolation = 'personal';
   validateTask(input);
-  const value = store.put('tasks', { ...input, status: input.assigneeId ? 'assigned' : 'draft', createdBy: 'user' });
+  const value = store.put('tasks', { ...input, status: input.assigneeId ? 'assigned' : 'draft', createdBy: 'user' }, { actor: 'user' });
   store.event(`작업 생성 · ${value.title}`, { taskId: value.id });
   return value;
 });
@@ -160,20 +193,20 @@ app.patch('/api/tasks/:id', async request => {
   if (task.workspace && ['projectId', 'isolation', 'assigneeId', 'departmentId'].some(key => input[key] !== task[key])) fail('작업 디렉토리가 생성된 작업은 프로젝트와 담당자를 바꿀 수 없습니다. 새 작업을 만들어주세요.');
   if ((task.projectId !== input.projectId || task.departmentId !== input.departmentId) && store.list('tasks').some(other => other.dependsOn.includes(task.id))) fail('다른 작업의 선행 작업입니다. 프로젝트나 소속 부서를 바꿀 수 없습니다.');
   validateTask(input, task.id);
-  return store.patch('tasks', task.id, input);
+  return store.patch('tasks', task.id, input, { actor: 'user' });
 });
 app.post('/api/tasks/:id/run', async request => orchestrator.queue(request.params.id));
 app.post('/api/tasks/:id/cancel', async request => {
   const task = store.require('tasks', request.params.id);
   if (['done', 'cancelled'].includes(task.status)) fail('이미 종료된 작업입니다.');
   if (task.status === 'running' && task.sessionId) orchestrator.stop(task.sessionId);
-  return store.patch('tasks', task.id, { status: 'cancelled' });
+  return store.patch('tasks', task.id, { status: 'cancelled' }, { actor: 'user' });
 });
 app.post('/api/tasks/:id/complete', async request => {
   const task = store.require('tasks', request.params.id);
   if (task.status !== 'review') fail('검토 대기 중인 작업만 완료할 수 있습니다.');
   store.event(`검토 완료 · ${task.title}`, { taskId: task.id });
-  return store.patch('tasks', task.id, { status: 'done', completedAt: now() });
+  return store.patch('tasks', task.id, { status: 'done', completedAt: now() }, { actor: 'user' });
 });
 app.get('/api/tasks/:id/patch', async (request, reply) => {
   const task = store.require('tasks', request.params.id);
@@ -188,14 +221,57 @@ app.post('/api/tasks/:id/integrate', async request => {
   return operation(task.projectId, async () => {
     const result = await integrate(store, task);
     store.event(`원본에 변경 적용 · ${task.title}`, { taskId: task.id });
-    return store.patch('tasks', task.id, { ...result, integratedAt: now() });
+    return store.patch('tasks', task.id, { ...result, integratedAt: now() }, { actor: 'user' });
   });
 });
 app.post('/api/consult', async request => orchestrator.consult(consultationSchema.parse(request.body)));
 app.post('/api/report', async request => orchestrator.report(consultationSchema.parse(request.body)));
+app.patch('/api/ceo', async request => {
+  const input = ceoSettingsSchema.parse(request.body);
+  return operation(CEO_ID, async () => {
+    const existing = store.require('members', CEO_ID);
+    if (existing.status === 'running') fail('TARS의 보고가 끝난 뒤 설정을 변경하세요.');
+    const value = store.patch('members', CEO_ID, input);
+    await syncMember(store, value);
+    return value;
+  });
+});
+app.post('/api/ceo/report', async request => operation(CEO_ID, async () => orchestrator.oversee(ceoReportSchema.parse(request.body))));
+app.post('/api/ceo/chat', async request => operation(CEO_ID, async () => orchestrator.chat(ceoChatSchema.parse(request.body))));
+app.post('/api/ceo/chat/clear', async request => operation(CEO_ID, async () => orchestrator.resetChat(ceoChatSchema.pick({ projectId: true }).parse(request.body))));
+app.get('/api/sessions/:id/terminal', async (request, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  return readTerminal(store.require('sessions', request.params.id));
+});
 app.post('/api/sessions/:id/stop', async request => { orchestrator.stop(request.params.id); return { ok: true }; });
+app.post('/api/sessions/:id/steer', async request => {
+  const { prompt } = ceoChatSchema.pick({ prompt: true }).parse(request.body);
+  return orchestrator.steer(request.params.id, prompt);
+});
+const historyQuery = z.object({ before: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).strict();
+for (const kind of ['sessions', 'tasks', 'members']) app.get(`/api/${kind}/:id/history`, async (request, reply) => {
+  store.require(kind, request.params.id);
+  reply.header('Cache-Control', 'no-store');
+  return store.history(kind, request.params.id, historyQuery.parse(request.query));
+});
+app.get('/api/sessions/:id/record', async (request, reply) => {
+  const session = store.require('sessions', request.params.id);
+  if (!session.recordPath) fail(session.recordError || '실행 종료 후 업무 기록을 내려받을 수 있습니다.', 409);
+  reply.header('Cache-Control', 'no-store');
+  reply.header('Content-Disposition', `attachment; filename="tars-work-${session.id}.md"`);
+  return reply.type('text/markdown; charset=utf-8').send(await readFile(recordPath(session), 'utf8'));
+});
+app.get('/api/members/:id/management', async (request, reply) => {
+  const manager = store.require('members', request.params.id);
+  if (!['ceo', 'leader'].includes(manager.role)) fail('팀장 또는 CEO의 관리 상태만 조회할 수 있습니다.', 400);
+  const { projectId } = z.object({ projectId: z.string().uuid().optional() }).strict().parse(request.query);
+  if (projectId) store.require('projects', projectId);
+  reply.header('Cache-Control', 'no-store');
+  return managementSnapshot(store, manager, projectId);
+});
 app.get('/api/sessions/:id/logs', async request => {
   const session = store.require('sessions', request.params.id);
+  if (session.transport === 'app-server') return readTerminal(session);
   try { return { content: (await readFile(join(DATA, 'sessions', session.id, 'activity.log'), 'utf8')).slice(-16000) }; }
   catch (error) { if (error.code === 'ENOENT') return { content: '아직 실행 로그가 없습니다.' }; throw error; }
 });
@@ -203,11 +279,12 @@ app.patch('/api/settings', async request => store.patch('settings', 'main', sett
 
 async function initialize() {
   if (!store.list('documents').some(doc => doc.kind === 'instruction')) {
-    store.put('documents', { title: '팀 공통 작업 원칙', kind: 'instruction', version: 1, revisions: [], projectId: null, departmentId: null,
+    store.put('documents', { title: '팀 공통 작업 원칙', kind: 'instruction', instructionMode: 'always', version: 1, revisions: [], projectId: null, departmentId: null,
       content: '사용자의 요청 범위와 프로젝트 지침을 우선합니다.\n\n- 필요한 자료만 읽고 작업 결과와 차단 사항을 짧게 보고합니다.\n- 확인하지 않은 결과는 미검증으로 표시합니다.\n- 명시적으로 요청하지 않은 테스트, 빌드, 컴파일, 실행 검증은 수행하지 않습니다.\n- 기존 작업을 보존하고 커밋, 푸시, 배포는 별도 지시가 있을 때만 수행합니다.\n- 팀장은 설계와 위임에 집중하고 팀원은 배정된 범위만 수행합니다.\n- 토큰 사용량을 추측하거나 만들어내지 않습니다.',
     });
   }
   await syncShared(store);
+  await syncMember(store, ensureCeo(store));
   await orchestrator.recover();
   ready = true;
 }
@@ -216,6 +293,8 @@ async function shutdown() {
   if (closing) return;
   closing = true;
   ready = false;
+  closeAccountUsage();
+  closeModelCatalog();
   await orchestrator.shutdown();
   clearTimeout(updateTimer);
   for (const client of clients) client.end();

@@ -1,9 +1,21 @@
 <!doctype html>
-<html lang="ko">
+<html lang="ko" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f6f7f9" />
+    <meta name="theme-color" content="#080808" />
+    <style>html{background:#080808;color-scheme:dark}html[data-theme="light"]{background:#f7f7f7;color-scheme:light}</style>
+    <script>
+      (() => {
+        let theme = 'dark';
+        try {
+          const saved = localStorage.getItem('tars:theme');
+          if (saved === 'light' || saved === 'dark') theme = saved;
+        } catch { /* Keep the default when browser storage is unavailable. */ }
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#080808' : '#f7f7f7';
+      })();
+    </script>
     <meta name="description" content="Tars — 나의 AI 팀을 위한 작업 공간" />
     <title>Tars · AI team workspace</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />

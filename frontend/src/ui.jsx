@@ -8,7 +8,7 @@ export function Badge({ status, children }) { return <span className={`badge ${s
 export function Avatar({ member, large = false }) {
   return <span className={`avatar ${member?.provider || 'codex'} ${large ? 'large' : ''}`}>
     {member?.name?.slice(0, 1).toUpperCase() || <Bot size={18} />}
-    {member?.role === 'leader' && <span className="crown"><Crown size={10} /></span>}
+    {['leader', 'ceo'].includes(member?.role) && <span className="crown"><Crown size={10} /></span>}
   </span>;
 }
 export function Empty({ title, description, action, label = '시작하기', compact = false }) {

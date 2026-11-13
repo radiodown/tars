@@ -138,11 +138,10 @@ class Console:
             line((prefix + "─" * max(0, width - cells(prefix) - 2), "38;5;239"))
 
         if self.page == "dashboard" and rows >= 24 and columns >= 54:
-            span = max(map(len, LOGO))
             for row in LOGO:
                 parts = [("  ", "")]
-                for index, char in enumerate(row):
-                    code = f"1;38;5;{GRADIENT[min(len(GRADIENT) - 1, index * len(GRADIENT) // span)]}" if char == "█" else "38;5;60"
+                for char in row:
+                    code = "1;38;5;114" if char == "█" else "38;5;65"
                     parts.append((char, code))
                 line(*parts)
             line(("", ""))
@@ -175,6 +174,7 @@ class Console:
                 ("/start [backend|frontend]", "전체 또는 개별 서버 시작"),
                 ("/stop [backend|frontend]", "전체 또는 개별 서버 중지"),
                 ("/restart [backend|frontend]", "전체 또는 개별 서버 재시작"),
+                ("/rebuild [backend|frontend]", "빌드 실행 · build 스크립트 없으면 생략"),
                 ("/logs [backend|frontend]", "최근 서버 로그 펼치기"),
                 ("/status", "기본 상태 화면으로 돌아가기"),
                 ("q / /quit", "콘솔 닫기 · 실행 중 서버는 유지"),
@@ -207,18 +207,21 @@ class Console:
         active = sum(bool(service["pids"]) for service in services)
         pulse = SPINNER[tick % len(SPINNER)]
         if self.busy:
-            status = f"{pulse} WORKING  ·  {int(time.monotonic() - self.operation_started)}s"
+            status_parts = [(f"  {pulse} WORKING  ·  {int(time.monotonic() - self.operation_started)}s", "38;5;244")]
         else:
-            status = f"{pulse} LIVE  ·  서버 {active}/2  ·  콘솔 {elapsed // 60:02}:{elapsed % 60:02}  ·  상태 조회 2s"
+            status_parts = [
+                (f"  {pulse} LIVE", f"1;38;5;{GRADIENT[tick % len(GRADIENT)]}"),
+                (f"  ·  서버 {active}/2  ·  콘솔 {elapsed // 60:02}:{elapsed % 60:02}  ·  상태 조회 2s", "38;5;244"),
+            ]
         notice_symbol = "✘ " if self.notice_error else "› "
         capacity = max(0, width - 10)
         pending = self.pending[-capacity:] if capacity else ""
         prompt = "  Tars ❯ " + pending
         footer = [
             styled([("  " + "─" * max(0, width - 4), "38;5;239")], width, self.color),
-            styled([("  1 시작   2 중지   3 재시작   4 로그   5 상태   /help   q 닫기", "38;5;245")], width, self.color),
+            styled([("  1 시작   2 중지   3 재시작   4 로그   5 상태   6 리빌드   /help   q 닫기", "38;5;245")], width, self.color),
             styled([("  " + notice_symbol + self.notice, "38;5;203" if self.notice_error else "38;5;179")], width, self.color),
-            styled([("  " + status, f"1;38;5;{GRADIENT[tick % len(GRADIENT)]}")], width, self.color),
+            styled(status_parts, width, self.color),
             styled([("  Tars ❯ ", "1;38;5;51"), (pending, "38;5;255")], width, self.color),
         ]
         lines = (body + footer)[-rows:]

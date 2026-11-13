@@ -18,3 +18,42 @@ dialog{padding:0;border:1px solid #e3e8df;border-radius:13px;width:min(520px,cal
 .nav-link{font-size:13px}.page-heading p,.section-heading>a,.section-heading .text-button{font-size:12px;color:#748191}.stat-title{font-size:11px;color:#758393}.stat-card>small{font-size:10px;color:#8b96a2}.section-heading h2{font-size:15px}.badge{font-size:10px}.badge.running,.badge.preparing{color:#5979b1}.badge.done,.badge.completed{color:#698b48}.badge.blocked,.badge.failed,.badge.interrupted{color:#aa6956}.badge.review{color:#987a42}.badge.queued{color:#8066a7}.onboarding-card p,.empty p{font-size:11px;color:#849477}.empty h3{font-size:13px;color:#647483}.timeline-item p{font-size:11px;color:#768390}.task-table-row strong{font-size:11px}.task-table-row .muted{font-size:10px}.markdown{font-size:13px;color:#62715b}.member-card>p,.document-card>p,.session-stage{font-size:11px;color:#8b9981}.task-card>p{font-size:11px;color:#8b98a7}.department-card>p{font-size:10px;color:#8f9ba8}.document-card h3{font-size:14px;color:#637487}.field>span{font-size:12px;color:#687c59}.field small{font-size:10px;color:#8a9b7b}.revision-history{border-top:1px solid var(--line);margin-top:25px;padding-top:18px;font-size:11px;color:#81956f}.revision-history summary{cursor:pointer;padding:10px 0}.revision-history>details{padding-left:13px}.revision-history .markdown{max-height:330px;overflow:auto;padding:12px;background:#f7f9f4;border-radius:6px}.checkbox-label{color:#7e8b99}.chart-note,.usage-note{color:#829375}.toolbar-count{color:#84909d}.composer textarea::placeholder{color:#8f9e83}.settings-card p.muted{color:#8c9a81}.topbar .connection{color:#819076}.welcome-copy p{color:#aebbc6}.welcome-label{color:#aebbc6}
 @media(max-width:1000px){.sidebar .nav-link{font-size:0}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+.account-quota-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:18px;align-items:start}
+.account-quota-card{padding:16px;min-width:0}
+.account-quota-card>header{display:flex;align-items:center;gap:9px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.account-quota-card>header>div{min-width:0}
+.account-quota-card .provider-logo{width:32px;height:32px;flex-shrink:0;border-radius:5px}
+.account-quota-card .provider-logo svg{width:18px;height:18px}
+.account-quota-card h2{margin:0;font-size:15px;color:var(--ink)}
+.account-quota-card header p{margin:3px 0 0;color:#7d8997;font-size:10px}
+.account-plan{margin-left:auto;background:#edf3e7;border:1px solid #dce8cf;border-radius:5px;padding:4px 7px;font-size:10px;color:#536f39;font-weight:600;overflow-wrap:anywhere;max-width:50%}
+.weekly-limit{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;padding:14px 0}
+.weekly-limit+.weekly-limit{border-top:1px solid var(--line)}
+.weekly-label,.weekly-details,.account-quota-card>footer{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.weekly-label{justify-content:flex-start;align-self:center;gap:4px 8px}
+.weekly-label h3{margin:0;font-size:12px;font-weight:600;color:#4e5c6a}
+.weekly-label>span{font-size:11px;color:#7b8795}
+.weekly-value{display:flex;align-items:baseline;justify-content:flex-end;flex-wrap:wrap;gap:4px;margin:0;max-width:132px;text-align:right}
+.weekly-value>strong{font-family:'Manrope',sans-serif;font-size:23px;line-height:1.2;letter-spacing:-.6px;color:#263940;font-variant-numeric:tabular-nums}
+.weekly-value small{font-size:12px;margin-left:2px;letter-spacing:0}
+.weekly-value>span{font-size:10px;line-height:1.5;color:#7b8795}
+.quota-track{grid-column:1/-1;height:5px;background:#edf1e9;border-radius:20px;overflow:hidden}
+.quota-track>span{display:block;height:100%;border-radius:inherit;background:#8ab65b}
+.weekly-limit.medium .quota-track>span{background:#c69c49}
+.weekly-limit.high .quota-track>span{background:#c7785b}
+.weekly-limit.expired .quota-track{background:#edf0f3}
+.weekly-details{grid-column:1/-1;gap:3px 10px;font-size:11px;color:#788594;line-height:1.6}
+.weekly-details>span:last-child{display:flex;align-items:center;gap:5px}
+.account-quota-card>footer{padding-top:10px;gap:5px 10px;border-top:1px solid var(--line);font-size:10px;color:#8893a0}
+.quota-status{display:flex;align-items:center;gap:6px}
+.quota-status>i{width:5px;height:5px;border-radius:50%;background:#a3aeb9}
+.quota-status.ready>i{background:#80a855}
+.quota-empty{min-height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:16px 0}
+.quota-empty-value{font-size:24px;color:#a4afba;line-height:1;margin-bottom:8px}
+.quota-empty strong{font-size:12px;color:#647180}
+.quota-empty p{font-size:11px;line-height:1.6;color:#83909e;margin:6px 0 0}
+.quota-retry{font-size:11px;color:#977349;margin:12px 0 0;line-height:1.7}
+.account-usage-page>.usage-note{font-size:11px;line-height:1.7;color:#84909e;margin-top:14px}
+@media(max-width:1200px){.account-quota-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:800px){.account-quota-grid{grid-template-columns:1fr;gap:12px}.account-quota-card{padding:14px}}
