@@ -4,9 +4,10 @@ import { Download, History, ArrowUpRight } from 'lucide-react';
 import { useWorkspace } from './App';
 import { api, isLive, labels, providerLabel, time } from './api';
 import { Badge, Markdown } from './ui';
+import { WorkApprovals } from './WorkApprovals';
 import './work-history.css';
 
-const eventNames = { status: '상태', progress: '진행 단계', note: 'AI 진행 보고', instruction: '추가 지시', assignment: '담당자', edited: '작업 수정', integrated: '통합' };
+const eventNames = { status: '상태', progress: '진행 단계', note: 'AI 진행 보고', instruction: '추가 지시', assignment: '담당자', edited: '작업 수정', integrated: '통합', submitted: '결과 제출', reviewed: '결과 검토', approval_requested: '사용자 확인 요청', user_response: '사용자 승인·의견' };
 const entityNames = { sessions: '실행', tasks: 'TASK', members: 'AI' };
 const timestamp = value => value ? new Intl.DateTimeFormat('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '기록 없음';
 
@@ -43,7 +44,7 @@ export function ExecutionRecord({ session }) {
   const { data, open } = useWorkspace();
   const request = session.request;
   return <section className="work-record">
-    <header><h3><History size={16} />업무 기록</h3>{session.recordPath && <a href={`/api/sessions/${session.id}/record`} download><Download size={14} />기록 MD</a>}</header>
+    <header><h3><History size={16} />실행 기록</h3>{session.recordPath && <a href={`/api/sessions/${session.id}/record`} download><Download size={14} />기록 MD</a>}</header>
     <dl>
       <div><dt>담당</dt><dd>{request?.worker.name || data.members.find(member => member.id === session.memberId)?.name || '기록 없음'} · {providerLabel(session)}</dd></div>
       <div><dt>상위 관리자</dt><dd>{request?.manager?.name || '없음 / 이전 기록'}</dd></div>
@@ -52,6 +53,8 @@ export function ExecutionRecord({ session }) {
       {isLive(session.status) && <div><dt>서버 실행 확인</dt><dd>{timestamp(session.heartbeatAt)}</dd></div>}
       {session.resultSnapshot?.taskStatus && <div><dt>실행 종료 시 task</dt><dd><Badge status={session.resultSnapshot.taskStatus} /></dd></div>}
     </dl>
+    {session.continuationOf && <p className="muted">{session.continuationMode === 'resumed' ? '원래 AI 세션을 재개했습니다.' : session.continuationMode === 'resuming' ? '원래 AI 세션 재개를 요청했습니다.' : '원래 협의·결과와 사용자 의견을 전달해 이어서 실행합니다.'} <button type="button" className="text-button" onClick={() => open('sessionDetail', { id: session.continuationOf })}>원래 실행 보기</button></p>}
+    {[...new Set([session.requestId, ...(session.requestIds || [])].filter(Boolean))].map(requestId => <WorkApprovals key={requestId} requestId={requestId} />)}
     <details className="work-request"><summary>받은 지시와 배정 task{request?.task ? ` · ${request.task.title}` : ''}</summary>
       {request ? <>
         <p className="muted">실행 당시 저장한 내용 · 지시/배정자: {request.requestedBy.name}</p>

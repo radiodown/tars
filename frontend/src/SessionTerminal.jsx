@@ -5,10 +5,14 @@ import { ArrowDownToLine, ArrowUpRight, Copy, RefreshCw, Send, Square, Terminal 
 import { useWorkspace } from './App';
 import { api, canSteer, isLive, labels, providerLabel, time } from './api';
 import { Badge, Empty } from './ui';
+import { MemberChat } from './MemberChat';
 
 export const sessionTitle = (session, data) => session.kind === 'ceo_chat' ? 'TARS와 대화'
+  : session.kind === 'member_chat' ? 'AI와 대화'
   : session.kind === 'oversight' ? '프로젝트 총괄 보고' : session.kind === 'plan' ? '협의 및 작업 설계'
-    : session.kind === 'review' ? '결과 보고' : session.request?.task?.title || data.tasks.find(task => task.id === session.taskId)?.title || '작업 수행';
+    : session.kind === 'review' ? '결과 보고' : session.kind === 'task_review' ? '작업 결과 검토'
+      : session.kind === 'request_report' ? '요청 최종 보고' : session.kind === 'request_escalation' ? '차단 사항 보고'
+        : session.kind === 'user_followup' ? '승인·의견 후속 처리' : session.request?.task?.title || data.tasks.find(task => task.id === session.taskId)?.title || '작업 수행';
 
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
@@ -80,30 +84,23 @@ export function SessionTerminal({ session, visible = true }) {
   </section>;
 }
 
-export function TeamConsole({ compact = false, initialSessionId = '', visible = true }) {
-  const { data, open } = useWorkspace();
+export function TeamConsole({ compact = false, initialSessionId = '', initialMemberId = '', role, visible = true }) {
+  const { data } = useWorkspace();
   const initial = data.sessions.find(session => session.id === initialSessionId);
-  const [memberId, setMemberId] = useState(initial?.memberId || '');
-  const [sessionId, setSessionId] = useState(initial?.id || 'latest');
-  const [liveOnly, setLiveOnly] = useState(false);
-  const members = data.members.filter(member => (!compact || member.role !== 'ceo')
-    && (!liveOnly || data.sessions.some(session => session.memberId === member.id && isLive(session.status))))
-    .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running') || a.name.localeCompare(b.name));
+  const [memberId, setMemberId] = useState(initialMemberId || initial?.memberId || '');
+  const members = data.members.filter(member => (!compact || member.role !== 'ceo') && (!role || member.role === role))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
   const member = members.find(item => item.id === memberId) || members[0];
-  const sessions = data.sessions.filter(session => session.memberId === member?.id && (!liveOnly || isLive(session.status)));
-  const session = sessions.find(item => item.id === sessionId)
-    || sessions.find(item => item.id === member?.currentSessionId) || sessions[0];
   return <section className={`team-console ${compact ? 'compact' : ''}`}>
-    <div className="console-heading"><h2><Terminal size={17} />{compact ? '팀원 CLI' : 'AI 세션 콘솔'}</h2><label><input type="checkbox" checked={liveOnly} onChange={event => setLiveOnly(event.target.checked)} />실행 중만</label>{compact && <Link to="/sessions" aria-label="전체 세션 콘솔"><ArrowUpRight size={16} /></Link>}</div>
-    <div className="console-members" aria-label="세션을 볼 AI 선택">{members.map(item => <button key={item.id} type="button" aria-pressed={member?.id === item.id} onClick={() => { setMemberId(item.id); setSessionId('latest'); }}><i className={item.status === 'running' ? 'active' : ''} /><span>{item.name}</span><small>{providerLabel(item)} · {item.role === 'ceo' ? 'CEO' : item.role === 'leader' ? '팀장' : '팀원'}</small></button>)}</div>
-    {member && <div className="console-session-select"><label>실행 기록<select aria-label={`${member.name} 실행 세션 선택`} value={sessionId === 'latest' || !sessions.some(item => item.id === sessionId) ? 'latest' : sessionId} onChange={event => setSessionId(event.target.value)}><option value="latest">현재 / 최근 세션</option>{sessions.map(item => <option key={item.id} value={item.id}>{time(item.startedAt)} · {providerLabel(item)} · {sessionTitle(item, data)} · {labels[item.status] || item.status}</option>)}</select></label>{session && <Link to={`/sessions?session=${session.id}`} title="이 세션 전체 화면"><ArrowUpRight size={15} /></Link>}</div>}
-    {session && <div className="console-record-link"><button type="button" className="text-button" onClick={() => open('sessionDetail', session)}>지시 · 결과 · 상태 이력<ArrowUpRight size={13} /></button></div>}
-    {session ? <SessionTerminal key={session.id} session={session} visible={visible} /> : <div className="console-empty"><Empty compact title={members.length ? `${member?.name}의 실행 기록이 없습니다` : liveOnly ? '실행 중인 AI가 없습니다' : '등록된 팀원이 없습니다'} description="팀장이 협의하거나 팀원이 작업을 시작하면 CLI 출력을 확인할 수 있습니다." /></div>}
+    <div className="console-heading"><h2><Terminal size={17} />AI와 대화</h2>{compact && <Link to="/sessions" aria-label="전체 AI 대화"><ArrowUpRight size={16} /></Link>}</div>
+    <div className="console-members" aria-label="대화할 AI 이름">{members.map(item => <button key={item.id} type="button" aria-pressed={member?.id === item.id} onClick={() => setMemberId(item.id)}><i className={item.status === 'running' ? 'active' : ''} /><span>{item.name}</span><small>{item.role === 'ceo' ? 'CEO' : item.role === 'leader' ? '팀장' : '팀원'}</small></button>)}</div>
+    {member && visible ? <MemberChat key={member.id} member={member} /> : <div className="console-empty"><Empty compact title="대화할 AI가 없습니다" description="조직 관리에서 팀장이나 팀원을 추가하세요." /></div>}
   </section>;
 }
 
 export function Sessions() {
   const [params] = useSearchParams();
-  const selected = params.get('session') || '';
-  return <div className="page sessions-page"><div className="page-heading"><div><p className="eyebrow">LIVE EXECUTION</p><h1>실행 세션</h1><p>AI를 선택해 실행 명령, 도구 작업과 응답을 CLI 창에서 확인하세요.</p></div></div><TeamConsole key={selected} initialSessionId={selected} /></div>;
+  const selected = params.get('member') || '';
+  const legacySession = params.get('session') || '';
+  return <div className="page sessions-page"><div className="page-heading"><div><h1>AI와 대화</h1><p>AI의 이름을 선택하면 같은 창에서 대화를 이어갈 수 있습니다.</p></div></div><TeamConsole key={selected || legacySession} initialMemberId={selected} initialSessionId={legacySession} /></div>;
 }

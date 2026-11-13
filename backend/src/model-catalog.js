@@ -1,5 +1,7 @@
-import { executable } from './providers.js';
+import { executable } from './executables.js';
 import { codexConnection } from './codex-rpc.js';
+import { readClaudeModels } from './claude-models.js';
+import { modelSettingsError } from '../../shared/model-settings.mjs';
 
 const cache = new Map();
 const active = new Set();
@@ -41,12 +43,7 @@ async function readCodex(signal, account) {
 }
 
 export async function modelCatalog(provider, account = 'codex') {
-  if (provider === 'claude') {
-    // Official, version-independent CLI aliases. Availability still depends on the account.
-    return { provider, status: 'ready', models: ['sonnet', 'opus', 'haiku'].map(id => ({
-      id, label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`, reasoningEfforts: null, defaultReasoning: null,
-    })), message: 'Claude Code의 모델 별칭입니다. 실제 버전과 사용 가능 여부는 설치된 CLI 및 계정 설정을 따릅니다.' };
-  }
+  if (provider === 'claude') account = 'claude';
   const key = `${provider}:${account}`;
   const cached = cache.get(key);
   if (cached?.pending) return cached.pending;
@@ -57,7 +54,15 @@ export async function modelCatalog(provider, account = 'codex') {
   cache.set(key, entry);
   entry.pending = (async () => {
     let result;
-    try { result = await readCodex(controller.signal, account); }
+    try {
+      if (provider === 'claude') {
+        const binary = await executable('claude');
+        const models = binary ? await readClaudeModels(binary, controller.signal) : [];
+        result = { status: models.length ? 'ready' : 'unavailable', models,
+          message: models.length ? '설치된 Claude CLI의 모델 버전과 지원 추론 단계입니다. CLI 기본 모델은 실행 위치의 설정을 따릅니다.'
+            : 'Claude 모델 목록을 불러오지 못했습니다. CLI 설치와 로그인 상태를 확인하세요.' };
+      } else result = await readCodex(controller.signal, account);
+    }
     catch { result = { status: 'unavailable', models: [], message: `${account} 모델 목록을 불러오지 못했습니다. 해당 계정의 로그인 상태를 확인하세요.` }; }
     finally { active.delete(controller); }
     entry.value = { provider, accountId: account, ...result, checkedAt: new Date().toISOString() };
@@ -66,6 +71,14 @@ export async function modelCatalog(provider, account = 'codex') {
     return entry.value;
   })();
   return entry.pending;
+}
+
+export async function validateModelSettings(member) {
+  if (member.provider !== 'claude') return;
+  // Reject foreign effort names even if the CLI cannot be queried.
+  let error = modelSettingsError(member);
+  if (!error && member.model) error = modelSettingsError(member, await modelCatalog('claude'));
+  if (error) throw Object.assign(new Error(error), { statusCode: 400 });
 }
 
 export function closeModelCatalog() {

@@ -1,0 +1,49 @@
+.session-activity { min-width: 0; margin-top: 12px; font-size: 11px; }
+.activity-current { display: flex; align-items: flex-start; gap: 7px; color: var(--ceo-accent, var(--ink)); line-height: 1.65; overflow-wrap: anywhere; margin: 0 0 9px; }
+.activity-current > svg { flex: 0 0 auto; margin-top: 3px; }
+.activity-history { border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+.session-activity summary { cursor: pointer; display: flex; align-items: center; gap: 7px; list-style: none; min-width: 0; line-height: 1.6; padding: 9px 10px; }
+.session-activity summary::-webkit-details-marker { display: none; }
+.session-activity summary::before { content: '›'; flex: 0 0 9px; font-size: 15px; text-align: center; color: var(--muted); transition: transform .15s; }
+.session-activity details[open] > summary::before { transform: rotate(90deg); }
+.session-activity summary > svg { flex: 0 0 auto; color: var(--muted); }
+.session-activity summary:hover { background: var(--hover); }
+.session-activity summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.activity-history > summary small { color: var(--muted); margin-left: auto; }
+.activity-history-body { border-top: 1px solid var(--line); padding: 3px 0; max-height: 460px; overflow: auto; overscroll-behavior: contain; }
+.activity-list { list-style: none; padding: 0; margin: 0; }
+.activity-item + .activity-item { border-top: 1px solid var(--line); }
+.activity-item-title { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.activity-item-status { flex-shrink: 0; color: var(--muted); font-size: 10px; }
+.activity-running > details > summary .activity-item-status { color: var(--ceo-accent, var(--ink)); }
+.activity-failed > details > summary .activity-item-status { color: var(--red, #dc5252); }
+.activity-item-body { padding: 2px 12px 12px 26px; min-width: 0; }
+.activity-item-body:empty { display: none; }
+.session-activity :is(pre, code) { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', 'Noto Sans KR', monospace; }
+.session-activity pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 260px; margin: 7px 0; padding: 9px; background: var(--raised); border: 1px solid var(--line); border-radius: 3px; font-size: 11px; line-height: 1.6; }
+.session-activity pre.activity-diff { white-space: pre; overflow-wrap: normal; }
+.activity-diff code > span { display: block; }
+.activity-diff .diff-add { color: #22804b; background: #22804b12; }
+.activity-diff .diff-delete { color: #bf3d3d; background: #bf3d3d12; }
+.activity-diff .diff-range { color: var(--muted); }
+[data-theme='dark'] .activity-diff .diff-add { color: #89d4a6; }
+[data-theme='dark'] .activity-diff .diff-delete { color: #f0a2a2; }
+.activity-note, .activity-path { font-size: 10px; color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; margin: 6px 0; }
+.activity-history-body > .activity-note { padding: 0 12px; }
+.activity-note button { color: inherit; background: none; border: 0; text-decoration: underline; padding: 0 3px; }
+.activity-file p { display: flex; align-items: baseline; gap: 7px; overflow-wrap: anywhere; }
+.activity-file p > span { flex-shrink: 0; color: var(--muted); }
+.activity-file code { min-width: 0; }
+.activity-plan { padding: 0; margin: 6px 0; list-style: none; }
+.activity-plan li { display: flex; align-items: flex-start; gap: 7px; line-height: 1.7; margin-top: 5px; }
+.activity-plan li > svg { flex-shrink: 0; margin-top: 3px; }
+.activity-plan li > span { overflow-wrap: anywhere; }
+.activity-plan small { margin-left: auto; flex-shrink: 0; color: var(--muted); }
+.activity-total-diff { border-top: 1px solid var(--line); }
+.activity-total-diff > pre, .activity-total-diff > p { margin: 6px 10px; }
+@media (max-width: 600px) {
+  .activity-item-body { padding-left: 12px; }
+  .activity-history-body { max-height: 330px; }
+  .activity-item-status { max-width: 55px; white-space: normal; text-align: right; }
+}
+@media (prefers-reduced-motion: reduce) { .session-activity .spin { animation: none; } .session-activity summary::before { transition: none; } }

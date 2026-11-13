@@ -2,7 +2,7 @@ import { hostname, networkInterfaces } from 'node:os';
 
 export const bindHost = '0.0.0.0';
 export const frontendPort = 5173;
-export const backendPort = 3001;
+export const backendPort = Number(process.env.TARS_BACKEND_PORT || 3001);
 
 // Permit the machine's addresses and explicitly configured DNS names.
 // Both servers use the same names when accepting browser requests.

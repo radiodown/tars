@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowRight, Check, Code, Download, FileText, GitMerge, Pencil, Play, Square, User } from 'lucide-react';
+import { ArrowRight, Check, Code, Download, FileText, GitMerge, Pencil, Play, Square, Trash2, User } from 'lucide-react';
 import { useWorkspace } from './App';
 import { api, isLive, kindLabels, labels, providerLabel, time } from './api';
 import { Avatar, Badge, Dialog, Empty, Field, Markdown, Submit } from './ui';
 import { ModelFields } from './ModelFields';
 import { SessionTerminal } from './SessionTerminal';
 import { ExecutionRecord, HistoryTimeline, TaskExecutionHistory } from './WorkHistory';
+import { TaskResultVersions } from './TaskWorkflow';
 
 const templates = {
   agreement: '# 협의 문서\n\n## 목적과 배경\n\n## 요구사항과 범위\n\n## 합의된 결정\n\n## 제약 및 제외 범위\n\n## 미결 사항\n\n## 완료 기준\n',
@@ -14,6 +15,7 @@ const templates = {
   report: '# 결과 보고\n\n## 전체 결과\n\n## 작업별 완료 여부\n\n## 산출물과 통합\n\n## 검증 및 미검증 사항\n\n## 남은 문제\n',
   instruction: '# 공통 작업 지침\n\n', skill: '# 스킬\n\n## 목적\n\n## 적용 조건\n\n## 수행 절차\n', note: '',
 };
+const departmentReferenceLabels = { members: 'AI', tasks: '작업', documents: '문서', sessions: '실행 기록', requests: '요청', taskReports: '결과 보고', taskReviews: '검토 기록', workflowJobs: '후속 작업', events: '이벤트' };
 
 export function EntityForm({ type, initial }) {
   const { data, close, open, perform, busy } = useWorkspace();
@@ -26,14 +28,20 @@ export function EntityForm({ type, initial }) {
   const [content, setContent] = useState(initial.content ?? templates[initial.kind || 'note']);
   const [preview, setPreview] = useState(type === 'document' && editing);
   const [error, setError] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const titles = { department: '부서', member: role === 'leader' ? 'AI 팀장' : 'AI 팀원', project: '프로젝트', document: '문서', task: '작업' };
   const collection = { department: 'departments', member: 'members', project: 'projects', document: 'documents', task: 'tasks' }[type];
   const needsDepartment = ['member', 'task'].includes(type) && !data.departments.length;
   const leaderExists = data.members.some(member => member.departmentId === department && member.role === 'leader' && member.id !== initial.id);
+  const departmentReferences = type === 'department' && editing ? Object.entries(data)
+    .filter(([kind, records]) => kind !== 'departments' && Array.isArray(records))
+    .map(([kind, records]) => [departmentReferenceLabels[kind] || kind, records.filter(record => record.departmentId === initial.id).length])
+    .filter(([, count]) => count) : [];
   async function submit(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const values = Object.fromEntries(form);
+    if (type === 'department') values.projectId = values.projectId || null;
     if (type === 'document') Object.assign(values, { kind, content, instructionMode, readWhen: values.readWhen || '', projectId: values.projectId || null, departmentId: values.departmentId || null, ...(editing ? { version: initial.version } : {}) });
     if (type === 'task') Object.assign(values, { projectId: project || null, departmentId: department, assigneeId: values.assigneeId || null,
       dependsOn: form.getAll('dependsOn'), documentIds: form.getAll('documentIds'), isolation: project ? values.isolation : 'personal' });
@@ -41,12 +49,17 @@ export function EntityForm({ type, initial }) {
     try { await perform(`/${collection}${editing ? `/${initial.id}` : ''}`, editing ? 'PATCH' : 'POST', values); close(); }
     catch (issue) { setError(issue.message); }
   }
+  async function removeDepartment() {
+    try { await perform(`/departments/${initial.id}`, 'DELETE', undefined, '부서를 삭제했습니다.'); close(); }
+    catch (issue) { setError(issue.message); setConfirmDelete(false); }
+  }
   return <Dialog title={type === 'document' && editing ? initial.title : `${titles[type]} ${editing ? '수정' : '만들기'}`} subtitle={type === 'member' ? '이름과 역할을 정하고, 함께 일할 모델을 연결하세요.' : type === 'document' ? '하나의 원본을 모든 AI와 공유합니다.' : '작업에 필요한 정보를 입력하세요.'} onClose={close} wide={['document', 'task'].includes(type)}>
     {needsDepartment ? <Empty title="먼저 부서를 만들어주세요" description="AI와 작업은 부서에 속합니다." action={() => open('department')} label="부서 만들기" /> : <form onSubmit={submit}>
       {type === 'document' && <div className="editor-tabs"><button type="button" className={!preview ? 'selected' : ''} onClick={() => setPreview(false)}><Pencil size={14} />편집</button><button type="button" className={preview ? 'selected' : ''} onClick={() => setPreview(true)}><FileText size={14} />미리보기</button>{editing && <span>v{initial.version} · {time(initial.updatedAt)}</span>}</div>}
       <div className={preview ? 'visually-hidden' : ''}>
         <Field label={type === 'task' || type === 'document' ? '제목' : '이름'}><input name={type === 'task' || type === 'document' ? 'title' : 'name'} required maxLength={200} defaultValue={initial.title || initial.name || ''} placeholder={type === 'member' ? '예: Atlas' : type === 'department' ? '예: 플랫폼 개발팀' : '이름을 입력하세요'} /></Field>
         {['department', 'project', 'task'].includes(type) && <Field label={type === 'task' ? '작업 설명' : '설명'}><textarea name="description" rows={3} defaultValue={initial.description || ''} placeholder="목적과 수행할 내용을 적어주세요." /></Field>}
+        {type === 'department' && <Field label="기본 소스 프로젝트" hint="이 부서의 팀장과 협의하거나 결과 보고를 요청할 때 자동으로 적용합니다."><select name="projectId" defaultValue={initial.projectId || ''}><option value="">소스 프로젝트 없음</option>{data.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>{!data.projects.length && <button type="button" className="text-button" onClick={() => open('project')}>소스 경로 등록</button>}</Field>}
         {['member', 'task'].includes(type) && <Field label="소속 부서" hint={type === 'member' && editing ? '부서를 변경하면 조직도에서 이동합니다. 진행 중인 담당 작업이 있으면 먼저 정리하세요.' : undefined}><select value={department} onChange={event => setDepartment(event.target.value)} required>{data.departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></Field>}
         {type === 'member' && <>
           <Field label="역할" hint={leaderExists ? '이 부서에는 팀장이 있습니다. 팀원을 추가하거나 다른 부서를 선택하세요.' : '부서마다 팀장 한 명과 여러 팀원을 구성할 수 있습니다.'}><select name="role" value={role} onChange={event => setRole(event.target.value)} aria-invalid={role === 'leader' && leaderExists || undefined} ref={element => { element?.setCustomValidity(role === 'leader' && leaderExists ? '이 부서에는 이미 팀장이 있습니다.' : ''); }}><option value="leader" disabled={leaderExists}>팀장 · 설계 및 위임</option><option value="member">팀원 · 작업 수행</option></select></Field>
@@ -58,7 +71,7 @@ export function EntityForm({ type, initial }) {
         {type === 'task' && <>
           <div className="form-grid"><Field label="담당 팀원"><select name="assigneeId" defaultValue={initial.assigneeId || ''} key={department}><option value="">나중에 배정</option>{data.members.filter(m => m.departmentId === department && m.role === 'member').map(m => <option value={m.id} key={m.id}>{m.name} · {providerLabel(m)}</option>)}</select></Field><Field label="우선순위"><select name="priority" defaultValue={initial.priority || 'normal'}><option value="low">낮음</option><option value="normal">보통</option><option value="high">높음</option></select></Field></div>
           <div className="form-grid"><Field label="프로젝트"><select value={project} onChange={event => setProject(event.target.value)}><option value="">프로젝트 없이 작업</option>{data.projects.map(p => <option value={p.id} key={p.id}>{p.name}</option>)}</select></Field>{project && <Field label="소스 분리 방식"><select name="isolation" defaultValue={initial.isolation === 'copy' ? 'copy' : 'worktree'}><option value="worktree">Git worktree</option><option value="copy">디렉토리 복사</option></select></Field>}</div>
-          <Field label="완료 기준"><textarea name="acceptance" rows={3} defaultValue={initial.acceptance || ''} placeholder="어떤 결과가 나오면 완료인가요?" /></Field>
+          <Field label="완료 기준"><textarea required name="acceptance" rows={3} defaultValue={initial.acceptance || ''} placeholder="어떤 결과가 나오면 완료인가요?" /></Field>
           <Field label="선행 작업" hint="선택한 작업이 완료된 뒤 실행됩니다. Ctrl / ⌘로 여러 개를 선택할 수 있습니다."><select name="dependsOn" multiple defaultValue={initial.dependsOn || []} key={`${department}-${project}`}>{data.tasks.filter(t => t.id !== initial.id && t.departmentId === department && (t.projectId || '') === project).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></Field>
           <Field label="참고 문서"><select name="documentIds" multiple defaultValue={initial.documentIds || []}>{data.documents.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></Field>
         </>}
@@ -75,8 +88,10 @@ export function EntityForm({ type, initial }) {
       </div>
       {preview && <Markdown>{content || '*내용이 없습니다.*'}</Markdown>}
       {type === 'document' && editing && initial.revisions?.length > 0 && <details className="revision-history"><summary>이전 버전 {initial.revisions.length}개</summary>{initial.revisions.slice().reverse().map(revision => <details key={revision.version}><summary>v{revision.version} · {time(revision.savedAt)}</summary>{kind === 'instruction' && <p className="muted">{revision.instructionMode === 'on_demand' ? `필요할 때 읽기 · ${revision.readWhen}` : '항상 적용'}</p>}<Markdown>{revision.content}</Markdown></details>)}</details>}
+      {type === 'department' && editing && departmentReferences.length > 0 && <p className="department-delete-hint">연결된 {departmentReferences.map(([label, count]) => `${label} ${count}건`).join(' · ')}이 있어 이 부서를 삭제할 수 없습니다.</p>}
+      {type === 'department' && editing && confirmDelete && <div className="confirm-box" role="alert"><p>‘{initial.name}’ 부서를 삭제할까요? 삭제 후에는 되돌릴 수 없습니다.</p><div className="department-delete-actions"><button className="button secondary" type="button" onClick={() => setConfirmDelete(false)}>취소</button><button className="button secondary department-delete-confirm" type="button" disabled={busy} onClick={removeDepartment}>부서 삭제 확인</button></div></div>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="form-footer"><button className="button secondary" type="button" onClick={close}>닫기</button><Submit busy={busy} /></div>
+      <div className="form-footer">{type === 'department' && editing && <button className="button ghost department-delete-button" type="button" disabled={busy || departmentReferences.length > 0} onClick={() => setConfirmDelete(true)}><Trash2 size={14} />부서 삭제</button>}<button className="button secondary" type="button" onClick={close}>닫기</button><Submit busy={busy} /></div>
     </form>}
   </Dialog>;
 }
@@ -87,6 +102,8 @@ export function TaskDetail({ taskId }) {
   const [confirm, setConfirm] = useState(false);
   const task = data.tasks.find(t => t.id === taskId);
   const member = data.members.find(m => m.id === task?.assigneeId);
+  const request = (data.requests || []).find(item => item.id === task?.requestId);
+  const approvalNeeded = request?.approvalRequired && !request.executionAllowed;
   const patch = useQuery({ queryKey: ['patch', taskId, task?.updatedAt], enabled: showPatch, queryFn: async () => {
     const response = await fetch(`/api/tasks/${taskId}/patch`);
     if (!response.ok) throw new Error((await response.json()).error);
@@ -98,17 +115,17 @@ export function TaskDetail({ taskId }) {
     <div className="detail-badges"><Badge status={task.status} /><span className={`priority ${task.priority}`}>{task.priority === 'high' ? '높은 우선순위' : task.priority === 'low' ? '낮은 우선순위' : '보통 우선순위'}</span></div>
     <div className="detail-owner"><Avatar member={member} /><div><strong>{member?.name || '담당자 미지정'}</strong><small>{data.departments.find(d => d.id === task.departmentId)?.name}</small></div></div>
     <div className="action-row">
-      {['draft', 'assigned', 'blocked', 'review'].includes(task.status) && <><button className="button primary" disabled={busy || !task.assigneeId} onClick={() => fire(`/tasks/${task.id}/run`, 'POST', {}, '실행 대기열에 추가했습니다.')}><Play size={15} />{task.status === 'review' ? '다시 실행' : '작업 실행'}</button><button className="button secondary" onClick={() => open('task', task)}><Pencil size={15} />수정</button></>}
-      {task.status === 'review' && <button className="button dark" disabled={busy} onClick={() => fire(`/tasks/${task.id}/complete`, 'POST', {}, '검토 완료로 표시했습니다.')}><Check size={15} />검토 완료</button>}
+      {['draft', 'assigned', 'blocked', 'review'].includes(task.status) && <><button className="button primary" disabled={busy || !task.assigneeId || approvalNeeded} onClick={() => fire(`/tasks/${task.id}/run`, 'POST', {}, '실행 대기열에 추가했습니다.')}><Play size={15} />{task.status === 'review' ? '다시 실행' : '작업 실행'}</button><button className="button secondary" onClick={() => open('task', task)}><Pencil size={15} />수정</button></>}
       {!['done', 'cancelled'].includes(task.status) && <button className="button ghost" disabled={busy} onClick={() => fire(`/tasks/${task.id}/cancel`, 'POST', {}, '작업을 취소했습니다.')}><Square size={13} />취소</button>}
     </div>
+    {approvalNeeded && <p className="muted">작업을 실행하려면 아래 업무 기록에서 최신 협의안을 승인해야 합니다.</p>}
     {task.error && <div className="error-box">{task.error}</div>}
     <section className="detail-section"><h3>작업 설명</h3><Markdown>{task.description || '설명이 없습니다.'}</Markdown></section>
     <section className="detail-section"><h3>완료 기준</h3><Markdown>{task.acceptance || '등록된 완료 기준이 없습니다.'}</Markdown></section>
     {task.dependsOn.length > 0 && <section className="detail-section"><h3>선행 작업</h3>{task.dependsOn.map(key => { const dep = data.tasks.find(t => t.id === key); return <div className="dependency" key={key}><span>{dep?.title}</span><Badge status={dep?.status} /></div>; })}</section>}
     <section className="detail-section"><h3>작업 공간</h3><p className="mono path">{task.workspace || '첫 실행 시 작업 디렉토리를 만듭니다.'}</p><small className="muted">{task.isolation === 'worktree' ? 'Git worktree · 기준 커밋에서 작업' : task.isolation === 'copy' ? '디렉토리 복사 · 변경 사항은 수동 통합' : '개인 작업 디렉토리'}</small></section>
-    {task.report && <section className="detail-section"><h3>팀원 결과 보고</h3><Markdown>{task.report}</Markdown></section>}
-    <TaskExecutionHistory key={task.id} task={task} />
+    <TaskResultVersions key={task.id} task={task} />
+    <details><summary>실행 상세·상태 이력</summary><TaskExecutionHistory key={task.id} task={task} /></details>
     {['review', 'done'].includes(task.status) && task.isolation === 'worktree' && <section className="detail-section"><h3>변경 사항 통합</h3><div className="action-row"><button className="button secondary" onClick={() => setShowPatch(!showPatch)}><Code size={15} />패치 {showPatch ? '접기' : '보기'}</button>{task.status === 'done' && !task.integratedAt && <button className="button secondary" onClick={() => { setShowPatch(true); setConfirm(true); }}><GitMerge size={15} />원본에 적용</button>}</div>
       {showPatch && <pre className="patch-preview">{patch.isError ? patch.error.message : patch.isPending ? '변경 내용을 불러오는 중…' : patch.data || '변경 사항이 없습니다.'}</pre>}
       {confirm && !task.integratedAt && <div className="confirm-box"><p>아래 원본 디렉토리에 변경 사항을 적용합니다. 커밋은 만들지 않습니다.</p><code>{data.projects.find(p => p.id === task.projectId)?.path}</code><button className="button primary" disabled={busy || patch.isPending || patch.isError || !patch.data} onClick={() => { fire(`/tasks/${task.id}/integrate`, 'POST', {}, '변경 사항을 원본에 적용했습니다.'); setConfirm(false); }}>변경 사항 적용</button></div>}

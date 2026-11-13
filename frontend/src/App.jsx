@@ -7,6 +7,7 @@ import { Dashboard, Organization, Tasks, Sessions, Consultation, Library, Usage,
 import { EntityForm, TaskDetail, SessionDetail } from './forms.jsx';
 import { CeoOffice, CeoSettings } from './Ceo.jsx';
 import { Projects } from './Projects.jsx';
+import { RequestFlow } from './RequestFlow.jsx';
 import { FloatingCreate } from './FloatingCreate.jsx';
 import { navigation, orderedNavigation } from './navigation';
 
@@ -64,11 +65,11 @@ export default function App() {
   const open = (type, initial = {}) => { setMenu(false); setModal({ type, initial }); };
   const fire = (...args) => perform(...args).catch(() => {});
   const data = query.data;
-  const currentTitle = navigation.find(([path]) => path === location.pathname)?.[1] || '설정';
+  const currentTitle = navigation.find(([path]) => path === location.pathname)?.[1] || (location.pathname === '/sessions' ? 'AI와 대화' : '설정');
   return <Workspace.Provider value={{ data, open, perform, fire, busy, notice, close: () => setModal(null) }}>
     <div className="app-shell">
       <aside className="sidebar">
-        <NavLink to="/" className="brand" aria-label="TARS 홈"><strong className="brand-wordmark">TARS</strong></NavLink>
+        <NavLink to="/ceo" className="brand" aria-label="TARS 홈"><strong className="brand-wordmark">TARS</strong></NavLink>
         <p className="nav-label">WORKSPACE</p>
         <nav aria-label="주 메뉴">
           {orderedNavigation(data?.settings.menuOrder).map(([path, label, Icon]) => <NavLink end={path === '/'} to={path} key={path} className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}><Icon size={18} strokeWidth={1.7} /><span>{label}</span>{path === '/tasks' && data?.tasks.length > 0 && <small>{data.tasks.filter(t => !['done', 'cancelled'].includes(t.status)).length}</small>}</NavLink>)}
@@ -84,11 +85,12 @@ export default function App() {
         <main>{!data ? <div className="loading-state"><Activity size={32} /><h2>{query.isError ? '서버에 연결할 수 없습니다' : '작업 공간을 준비하고 있습니다'}</h2><p>{query.isError ? '백엔드 실행 상태를 확인한 뒤 다시 연결하세요.' : '팀과 작업 현황을 불러오는 중입니다.'}</p>{query.isError && <button className="button primary" onClick={() => query.refetch()}>다시 연결</button>}</div> : <Routes>
           <Route path="/ceo" element={<CeoOffice />} />
           <Route path="/projects" element={<Projects />} />
+          <Route path="/requests" element={<RequestFlow />} />
           <Route path="/" element={<Dashboard />} /><Route path="/organization" element={<Organization />} /><Route path="/tasks" element={<Tasks />} /><Route path="/sessions" element={<Sessions />} /><Route path="/consult" element={<Consultation />} /><Route path="/library" element={<Library />} /><Route path="/usage" element={<Usage />} /><Route path="/settings" element={<Preferences />} /><Route path="*" element={<Dashboard />} />
         </Routes>}</main>
       </div>
     </div>
-    <FloatingCreate expanded={menu} onOpenChange={setMenu} onCreate={open} disabled={!data} />
+    {!['/ceo', '/sessions', '/consult'].includes(location.pathname) && <FloatingCreate expanded={menu} onOpenChange={setMenu} onCreate={open} disabled={!data} />}
     {notice && <div className={`toast ${notice.error ? 'error' : ''}`} role={notice.error ? 'alert' : 'status'}>{notice.error ? <CircleHelp size={19} /> : <Check size={19} />}<span>{notice.message}</span><button aria-label="알림 닫기" onClick={() => setNotice(null)}><X size={16} /></button></div>}
     {modal && data && (modal.type === 'ceoSettings' ? <CeoSettings /> : modal.type === 'taskDetail' ? <TaskDetail taskId={modal.initial.id} /> : modal.type === 'sessionDetail' ? <SessionDetail sessionId={modal.initial.id} /> : <EntityForm key={`${modal.type}-${modal.initial.id || 'new'}`} type={modal.type} initial={modal.initial} />)}
   </Workspace.Provider>;

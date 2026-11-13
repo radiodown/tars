@@ -1,22 +1,13 @@
 import { spawn } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, readFile, readdir, mkdir, appendFile } from 'node:fs/promises';
-import { join, delimiter } from 'node:path';
-import { homedir } from 'node:os';
+import { readFile, readdir, mkdir, appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { DATA } from './store.js';
-import { codexAccountSchema, planJsonSchema } from './contracts.js';
+import { codexAccountSchema, outputSchemaFor } from './contracts.js';
 import { createTerminalRecorder } from './terminal.js';
-
-export async function executable(provider) {
-  const name = process.env[`TARS_${provider.toUpperCase()}_BIN`] || provider;
-  const directories = [...(process.env.PATH || '').split(delimiter).filter(Boolean), join(homedir(), '.local', 'bin'), join(homedir(), 'bin')];
-  // Preserve wrapper names: codex2 selects its account from argv[0], so do not realpath it.
-  const candidates = name.includes('/') ? [name] : [...new Set(directories)].map(dir => join(dir, name));
-  for (const path of candidates) {
-    try { await access(path, constants.X_OK); return path; } catch { /* Try next PATH entry. */ }
-  }
-  return null;
-}
+import { claudeAccessArgs } from './agent-access.js';
+import { executable } from './executables.js';
+import { validateModelSettings } from './model-catalog.js';
+export { executable } from './executables.js';
 
 export async function providers() {
   return Promise.all(['codex', 'claude'].map(async name => {
@@ -54,17 +45,16 @@ export async function launch({ session, member, cwd, prompt, minutes, onEvent, o
   if (session.provider === 'codex') {
     return codexServers.launch({ binary, session, member, cwd, prompt, minutes, onEvent, onIdentity });
   }
+  await validateModelSettings(member);
   const directory = join(DATA, 'sessions', session.id);
   await mkdir(directory, { recursive: true });
   const terminal = createTerminalRecorder(directory);
   terminal.write('SESSION', `${member.name} · ${command} · ${member.model || 'CLI 기본 모델'}\n작업 디렉토리: ${cwd}`);
-  const readOnly = session.kind !== 'work';
-  const toolset = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write';
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'dontAsk', '--tools', toolset, '--allowedTools', toolset,
-    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', ...claudeAccessArgs()];
+  if (session.resumeClaudeId) args.push('--resume', session.resumeClaudeId);
   if (member.model) args.push('--model', member.model);
-  if (member.reasoning !== 'default') args.push('--effort', member.reasoning);
-  if (session.kind === 'plan') args.push('--json-schema', JSON.stringify(planJsonSchema));
+  if (member.reasoning && member.reasoning !== 'default') args.push('--effort', member.reasoning);
+  if (outputSchemaFor(session.kind)) args.push('--json-schema', JSON.stringify(outputSchemaFor(session.kind)));
   const child = spawn(binary, args, {
     cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, TARS_SESSION_TOKEN: session.processToken },

@@ -9,7 +9,7 @@ export const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const DATA = resolve(process.env.TARS_DATA_DIR || resolve(ROOT, '.tars-data'));
 export const now = () => new Date().toISOString();
 export const id = () => randomUUID();
-export const collections = ['departments', 'members', 'projects', 'documents', 'tasks', 'sessions', 'events', 'settings'];
+export const collections = ['departments', 'members', 'projects', 'documents', 'tasks', 'sessions', 'events', 'settings', 'requests', 'taskReports', 'taskReviews', 'workflowJobs', 'workApprovals'];
 
 export class Store extends EventEmitter {
   constructor() {
@@ -44,7 +44,7 @@ export class Store extends EventEmitter {
   }
   list(kind) { return this.listStmt.all(kind).map(row => JSON.parse(row.body)); }
   put(kind, record, { actor = 'system' } = {}) {
-    const tracked = ['tasks', 'sessions', 'members'].includes(kind);
+    const tracked = ['tasks', 'sessions', 'members', 'requests'].includes(kind);
     // The current state and its history are committed together, including nested plans.
     if (tracked && !this.depth) return this.transaction(() => this.put(kind, record, { actor }));
     const previous = tracked && record.id ? this.get(kind, record.id) : null;
@@ -55,6 +55,12 @@ export class Store extends EventEmitter {
     return value;
   }
   patch(kind, key, values, options) { return this.put(kind, { ...this.require(kind, key), ...values, id: key }, options); }
+  delete(kind, key) {
+    const value = this.require(kind, key);
+    this.db.prepare('DELETE FROM records WHERE kind=? AND id=?').run(kind, key);
+    if (!this.depth) this.emit('change');
+    return value;
+  }
   recordChanges(kind, previous, value, actor) {
     const refs = { kind, entityId: value.id, actor,
       taskId: kind === 'tasks' ? value.id : value.taskId || null,

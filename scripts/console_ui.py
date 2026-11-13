@@ -54,6 +54,7 @@ class Console:
     def __init__(self, collect):
         self.collect = collect
         self.lock = threading.RLock()
+        self.refresh_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.snapshot = {"services": [], "logs": [], "network": "확인 중"}
         self.notice = "번호 또는 /명령 입력 후 Enter · /help 도움말 · q 콘솔 닫기"
@@ -62,6 +63,8 @@ class Console:
         self.page = "dashboard"
         self.log_target = "all"
         self.busy = False
+        self.phase = "WORKING"
+        self.snapshot_error = False
         self.operation = None
         self.operation_started = 0
         self.started = time.monotonic()
@@ -96,21 +99,35 @@ class Console:
         with self.lock:
             self.notice, self.notice_error = clean(text), error
 
-    def _poll(self):
-        while not self.stop_event.is_set():
+    def refresh(self):
+        # Serialize polling and the final operation check so older results cannot
+        # overwrite the service state collected after a stop/build/start.
+        with self.refresh_lock:
             try:
                 result = self.collect()
                 with self.lock:
                     self.snapshot = result
+                    self.snapshot_error = False
             except Exception as error:
+                with self.lock:
+                    self.snapshot_error = True
                 self.message(f"상태 조회 오류: {error}", error=True)
+
+    def _poll(self):
+        while not self.stop_event.is_set():
+            self.refresh()
             self.stop_event.wait(2)
+
+    def set_phase(self, phase):
+        with self.lock:
+            self.phase = phase
 
     def perform(self, title, action):
         if self.busy:
             self.message("진행 중인 서버 제어 작업이 끝난 뒤 다시 입력하세요.")
             return
         self.busy = True
+        self.phase = "WORKING"
         self.operation_started = time.monotonic()
         self.message(title)
 
@@ -121,7 +138,9 @@ class Console:
             except Exception as error:
                 self.message(str(error), error=True)
             finally:
-                self.busy = False
+                self.refresh()
+                with self.lock:
+                    self.busy = False
 
         self.operation = threading.Thread(target=work, name="tars-command", daemon=True)
         self.operation.start()
@@ -173,7 +192,7 @@ class Console:
             for command, help_text in (
                 ("/start [backend|frontend]", "전체 또는 개별 서버 시작"),
                 ("/stop [backend|frontend]", "전체 또는 개별 서버 중지"),
-                ("/restart [backend|frontend]", "전체 또는 개별 서버 재시작"),
+                ("/restart [backend|frontend]", "중지 → 리빌드 → 시작"),
                 ("/rebuild [backend|frontend]", "빌드 실행 · build 스크립트 없으면 생략"),
                 ("/logs [backend|frontend]", "최근 서버 로그 펼치기"),
                 ("/status", "기본 상태 화면으로 돌아가기"),
@@ -205,13 +224,26 @@ class Console:
         elapsed = int(time.monotonic() - self.started)
         tick = int(time.monotonic() * 10)
         active = sum(bool(service["pids"]) for service in services)
+        ready = sum(bool(service["pids"]) and service["http"].startswith("HTTP 2") for service in services)
         pulse = SPINNER[tick % len(SPINNER)]
         if self.busy:
-            status_parts = [(f"  {pulse} WORKING  ·  {int(time.monotonic() - self.operation_started)}s", "38;5;244")]
+            status_parts = [(f"  ● {self.phase}  ·  {int(time.monotonic() - self.operation_started)}s", "38;5;179")]
         else:
+            if self.snapshot_error or not services:
+                status, code = "● UNKNOWN", "38;5;244"
+            elif ready == len(services):
+                status, code = f"{pulse} LIVE", f"1;38;5;{GRADIENT[tick % len(GRADIENT)]}"
+            elif ready:
+                status, code = "● PARTIAL", "38;5;179"
+            elif active:
+                status, code = "● NOT READY", "38;5;179"
+            elif any(service["label"] == "EXITED" for service in services):
+                status, code = "● EXITED", "38;5;203"
+            else:
+                status, code = "● STOPPED", "38;5;244"
             status_parts = [
-                (f"  {pulse} LIVE", f"1;38;5;{GRADIENT[tick % len(GRADIENT)]}"),
-                (f"  ·  서버 {active}/2  ·  콘솔 {elapsed // 60:02}:{elapsed % 60:02}  ·  상태 조회 2s", "38;5;244"),
+                (f"  {status}", code),
+                (f"  ·  준비 {ready}/{len(services)}  ·  프로세스 {active}  ·  콘솔 {elapsed // 60:02}:{elapsed % 60:02}  ·  상태 조회 2s", "38;5;244"),
             ]
         notice_symbol = "✘ " if self.notice_error else "› "
         capacity = max(0, width - 10)

@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { GUIDANCE_CONFIG } from './guidance.js';
+import { codexAccessConfig, permissionResponse } from './agent-access.js';
 
 // Execution transport: bounded frames and per-request deadlines, no lifetime deadline.
 // A lost mutation response is ambiguous; close the owned runtime instead of retrying it.
 export function appServerTransport(binary, { cwd, processToken, onSpawn, onNotification, onFailure, onRequest }) {
   // Scope discovery overrides to TARS's execution process; account settings stay intact.
-  const overrides = Object.entries(GUIDANCE_CONFIG).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]);
+  const overrides = Object.entries({ ...GUIDANCE_CONFIG, ...codexAccessConfig() }).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]);
   const child = spawn(binary, [...overrides, 'app-server'], {
     cwd, detached: true, stdio: ['pipe', 'pipe', 'ignore'],
     env: { ...process.env, TARS_SESSION_TOKEN: processToken },
@@ -52,11 +53,10 @@ export function appServerTransport(binary, { cwd, processToken, onSpawn, onNotif
         if (!message || typeof message !== 'object') throw new Error('잘못된 RPC 메시지');
         if (message.method) {
           if (message.id != null) {
-            // Tars never grants new permissions or services authentication requests here.
-            const approval = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(message.method);
-            send(approval ? { id: message.id, result: { decision: 'decline' } }
+            const grant = permissionResponse(message.method, message.params || {});
+            send(grant ? { id: message.id, result: grant }
               : { id: message.id, error: { code: -32601, message: 'Tars does not support this server request' } });
-            onRequest(message.method, message.params || {});
+            onRequest(message.method, message.params || {}, Boolean(grant));
           } else onNotification(message.method, message.params || {});
         } else {
           const request = pending.get(message.id);

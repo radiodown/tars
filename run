@@ -306,7 +306,7 @@ def logs(names):
         print("\n".join(lines))
 
 
-def execute(action, target, settings):
+def execute(action, target, settings, progress=None):
     names = list(SERVICES) if target == "all" else [target]
     if action == "logs":
         logs(names)
@@ -317,15 +317,26 @@ def execute(action, target, settings):
     messages = []
     with locked():
         if action == "rebuild":
+            if progress:
+                progress("BUILDING")
             return " | ".join(rebuild(name, settings) for name in names)
         if action in ("start", "restart"):
             for name in names:
                 if action == "restart" or not owned_processes(read_state(name)):
                     preflight(name, settings)
         if action in ("stop", "restart"):
+            if progress:
+                progress("STOPPING")
             for name in reversed(names):
                 messages.append(stop(name))
+        if action == "restart":
+            if progress:
+                progress("BUILDING")
+            for name in names:
+                messages.append(rebuild(name, settings))
         if action in ("start", "restart"):
+            if progress:
+                progress("STARTING")
             for name in names:
                 messages.append(start(name, settings))
     return " | ".join(messages)
@@ -409,7 +420,7 @@ def interactive_loop(settings, console):
             console.message("최근 로그를 표시합니다. /status 로 기본 화면에 돌아갑니다.")
             continue
         verb = {"start": "시작", "stop": "중지", "restart": "재시작", "rebuild": "리빌드"}[action]
-        console.perform(f"{target} 서버 {verb} 중…", lambda action=action, target=target: execute(action, target, settings))
+        console.perform(f"{target} 서버 {verb} 중…", lambda action=action, target=target: execute(action, target, settings, console.set_phase))
 
 
 CHILDREN = []

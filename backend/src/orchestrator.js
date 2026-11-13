@@ -1,23 +1,31 @@
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { id, now } from './store.js';
+import { DATA, id, now } from './store.js';
 import { fail, planSchema } from './contracts.js';
 import { contextFor, memberDirectory, prepareWorkspace, syncShared } from './workspaces.js';
 import { guidanceFilesHash, prepareGuidance, prepareScope } from './guidance.js';
 import { killOwned, launch } from './providers.js';
 import { CodexAppServers } from './codex-app-server.js';
-import { CEO_ID, ceoContext, ceoConversation } from './ceo.js';
+import { CEO_ID, ceoContext } from './ceo.js';
 import { WorkStatusFiles, managementContext, reportInstructions, requestSnapshot, writeExecutionRecord } from './work-records.js';
+import { ACCESS_VERSION } from './agent-access.js';
+import { TaskWorkflow, workflowKinds } from './task-workflow.js';
+import { assertCurrentArtifacts, digest, taskRecordPath } from './task-artifacts.js';
+import { continuationSource } from './session-continuation.js';
+import { isMemberChat, memberConversationContext } from './member-conversations.js';
+import { saveSessionActivity } from './session-activity.js';
 
 export class Orchestrator {
-  constructor(store) {
+  constructor(store, { launchRun = launch } = {}) {
     this.store = store;
     this.active = new Map();
     this.closing = false;
     this.pumping = false;
     this.codexServers = new CodexAppServers(store, killOwned);
     this.statusFiles = new WorkStatusFiles(store);
+    this.workflow = new TaskWorkflow(store);
+    this.launchRun = launchRun;
   }
   async recover() {
     await this.codexServers.recover();
@@ -29,11 +37,12 @@ export class Orchestrator {
     }
     this.store.transaction(() => {
       for (const member of this.store.list('members')) this.store.patch('members', member.id, { status: 'idle', currentSessionId: null });
-      for (const task of this.store.list('tasks').filter(t => ['queued', 'running'].includes(t.status))) {
+      for (const task of this.store.list('tasks').filter(t => t.status === 'running')) {
         this.store.patch('tasks', task.id, { status: 'blocked', error: '서버 재시작으로 중단되었습니다. 작업 실행을 다시 요청하세요.' });
       }
     });
     for (const sessionId of interrupted) await this.saveRecord(sessionId);
+    this.workflow.recover();
     this.timer = setInterval(() => this.pump().catch(error => this.store.event(error.message, { level: 'error' })), 1500);
     this.heartbeatTimer = setInterval(() => {
       if (this.closing || !this.active.size) return;
@@ -58,40 +67,53 @@ export class Orchestrator {
       memberId: member.id, departmentId: member.departmentId, provider: member.provider,
       codexAccount: member.provider === 'codex' ? member.codexAccount || 'codex' : null,
       model: member.model || 'default', reasoning: member.reasoning || 'default',
-      transport: member.provider === 'codex' ? 'app-server' : 'cli', kind, status: 'preparing', startedAt: now(), endedAt: null,
+      transport: member.provider === 'codex' ? 'app-server' : 'cli', accessVersion: ACCESS_VERSION, kind, status: 'preparing', startedAt: now(), endedAt: null,
       progress: '작업 문맥 준비 중', output: '', processToken: id(), heartbeatAt: now(), lastActivityAt: null,
-      request: requestSnapshot(this.store, member, kind, details), ...details,
+      request: requestSnapshot(this.store, member, kind, details),
+      ...(kind === 'work' && details.taskId ? { taskSpecificationHash: this.workflow.specificationHash(details.taskId) } : {}), ...details,
     });
     const control = { memberId: member.id, cancelled: false, handle: null };
     this.active.set(session.id, control);
     this.store.patch('members', member.id, { status: 'running', currentSessionId: session.id });
-    this.store.event(`${member.name} · ${kind === 'ceo_chat' ? '대화' : kind === 'oversight' ? '프로젝트 총괄 보고' : kind === 'plan' ? '협의 및 작업 설계' : kind === 'review' ? '결과 보고' : '작업'} 시작`, { memberId: member.id, sessionId: session.id, taskId: details.taskId });
+    this.store.event(`${member.name} · ${isMemberChat(session) ? '대화' : kind === 'oversight' ? '프로젝트 총괄 보고' : kind === 'plan' ? '협의 및 작업 설계' : kind === 'review' ? '결과 보고' : '작업'} 시작`, { memberId: member.id, sessionId: session.id, taskId: details.taskId });
     return { session, control };
   }
-  consult(input) {
+  consult(input, identity = { actor: 'user', session: null }) {
     const member = this.store.require('members', input.leaderId);
     if (member.role !== 'leader') fail('팀장을 선택하세요.', 400);
-    if (input.projectId) this.store.require('projects', input.projectId);
-    const { session, control } = this.begin(member, 'plan', { projectId: input.projectId, prompt: input.prompt });
+    const projectId = input.projectId === undefined ? this.store.require('departments', member.departmentId).projectId || null : input.projectId;
+    if (projectId) this.store.require('projects', projectId);
+    this.assertAvailable(member);
+    const requestId = input.requestId || identity.session?.requestId || null;
+    if (requestId) this.workflow.requireWork(requestId, projectId, member.id);
+    const { session, control } = this.begin(member, 'plan', { projectId, prompt: input.prompt, requestId, initiatedBy: identity.actor });
     control.promise = this.run(session, member, control);
     return session;
   }
   report(input) {
     const member = this.store.require('members', input.leaderId);
     if (member.role !== 'leader') fail('팀장을 선택하세요.', 400);
-    if (input.projectId) this.store.require('projects', input.projectId);
-    const { session, control } = this.begin(member, 'review', { projectId: input.projectId, prompt: input.prompt });
+    const projectId = input.projectId === undefined ? this.store.require('departments', member.departmentId).projectId || null : input.projectId;
+    if (projectId) this.store.require('projects', projectId);
+    if (input.requestId) this.workflow.requireWork(input.requestId, projectId, member.id);
+    const { session, control } = this.begin(member, 'review', { projectId, prompt: input.prompt, requestId: input.requestId || null });
     control.promise = this.run(session, member, control);
     return session;
   }
-  queue(taskId) {
+  queue(taskId, actor = 'user') {
     const task = this.store.require('tasks', taskId);
     if (!['draft', 'assigned', 'blocked', 'review'].includes(task.status)) fail('현재 상태에서는 작업을 실행할 수 없습니다.');
     const member = this.store.require('members', task.assigneeId);
     if (member.role !== 'member' || member.departmentId !== task.departmentId) fail('같은 부서의 팀원을 담당자로 지정하세요.');
-    this.store.patch('tasks', taskId, { status: 'queued', error: null }, { actor: 'user' });
+    this.workflow.queueTask(taskId, actor);
     this.store.event(`실행 대기: ${task.title}`, { taskId });
     return this.store.require('tasks', taskId);
+  }
+  cancelTask(taskId, actor = 'user') {
+    const task = this.workflow.pauseTask(taskId, actor, true);
+    for (const session of this.store.list('sessions').filter(item => this.active.has(item.id) && (item.taskId === taskId
+      || (item.requestId === task.requestId && item.workflowJobId && this.store.get('workflowJobs', item.workflowJobId)?.status === 'cancelled')))) this.stop(session.id, actor);
+    return task;
   }
   oversee(input) {
     const member = this.store.require('members', CEO_ID);
@@ -101,26 +123,34 @@ export class Orchestrator {
     return session;
   }
   chat(input) {
-    const member = this.store.require('members', CEO_ID);
-    if (input.projectId) this.store.require('projects', input.projectId);
-    const conversationId = member.chatConversationIds?.[input.projectId || 'all'] || null;
-    const { session, control } = this.begin(member, 'ceo_chat', { projectId: input.projectId, prompt: input.prompt, conversationId });
+    return this.memberChat(CEO_ID, input);
+  }
+  memberChat(memberId, input) {
+    const member = this.store.require('members', memberId);
+    const projectId = member.role === 'ceo' ? input.projectId || null
+      : this.store.require('departments', member.departmentId).projectId || null;
+    if (projectId) this.store.require('projects', projectId);
+    const conversationId = member.chatConversationId || member.id;
+    this.assertAvailable(member);
+    const { session, control } = this.begin(member, member.role === 'ceo' ? 'ceo_chat' : 'member_chat', { projectId, prompt: input.prompt, conversationId });
     control.promise = this.run(session, member, control);
     return session;
   }
-  resetChat({ projectId }) {
+  resetChat() {
+    return this.resetMemberChat(CEO_ID);
+  }
+  resetMemberChat(memberId) {
     if (this.closing) fail('서버가 종료 중입니다.');
-    const member = this.store.require('members', CEO_ID);
-    if (projectId) this.store.require('projects', projectId);
+    const member = this.store.require('members', memberId);
     if (member.status === 'running' || [...this.active.values()].some(run => run.memberId === member.id)) {
-      fail('TARS의 진행 중인 작업을 중지하거나 끝난 뒤 /clear를 실행하세요.');
+      fail('진행 중인 작업을 중지하거나 끝난 뒤 /clear를 실행하세요.');
     }
     const conversationId = id();
     return this.store.transaction(() => {
       this.store.patch('members', member.id, {
-        chatConversationIds: { ...member.chatConversationIds, [projectId || 'all']: conversationId },
+        chatConversationId: conversationId,
       }, { actor: 'user' });
-      this.store.event('TARS · 새 대화 시작', { memberId: member.id, projectId, conversationId });
+      this.store.event(`${member.name} · 대화 문맥 초기화`, { memberId: member.id, conversationId });
       return { conversationId };
     });
   }
@@ -128,61 +158,194 @@ export class Orchestrator {
     if (this.closing || this.pumping) return;
     this.pumping = true;
     try {
+      this.workflow.reconcile();
+      await this.pumpJobs();
       for (const task of this.store.list('tasks').filter(t => t.status === 'queued').reverse()) {
         if (this.active.size >= this.store.get('settings', 'main').maxConcurrent) break;
+        if (task.requestId && this.store.get('requests', task.requestId)?.paused) continue;
+        if (!this.workflow.approvals.canExecute(task.requestId)) continue;
         if (!task.dependsOn.every(key => this.store.get('tasks', key)?.status === 'done')) continue;
         const member = this.store.get('members', task.assigneeId);
         if (!member) {
           this.store.patch('tasks', task.id, { status: 'blocked', error: '담당 AI가 없습니다.' });
           continue;
         }
-        if (member.status === 'running') continue;
-        const { session, control } = this.begin(member, 'work', { taskId: task.id, projectId: task.projectId });
+        if (member.status === 'running' || task.automationPaused || this.store.list('sessions').some(item => item.taskId === task.id && ['preparing', 'running', 'stopping'].includes(item.status))) continue;
+        const { session, control } = this.begin(member, 'work', { taskId: task.id, projectId: task.projectId, requestId: task.requestId });
         this.store.patch('tasks', task.id, { status: 'running', sessionId: session.id, error: null });
         control.promise = this.run(session, member, control);
       }
     } finally { this.pumping = false; }
+  }
+  async pumpJobs() {
+    for (const job of this.store.list('workflowJobs').filter(item => item.status === 'queued').reverse()) {
+      if (this.closing || this.active.size >= this.store.get('settings', 'main').maxConcurrent) break;
+      const request = job.requestId ? this.store.get('requests', job.requestId) : null;
+      if (request?.paused) continue;
+      if (job.kind === 'user_followup') {
+        this.pumpFollowup(job, request);
+        continue;
+      }
+      if (request?.pendingApprovalId || (request && this.workflow.approvals.pendingFollowup(request))) continue;
+      const task = job.taskId ? this.store.get('tasks', job.taskId) : null;
+      if (task && (task.latestReportId !== job.reportId || task.status !== 'review' || task.automationPaused)) {
+        this.store.patch('workflowJobs', job.id, { status: 'superseded', error: '검토 대상이 변경되었습니다.' }); continue;
+      }
+      if (!task && job.signature !== digest(this.workflow.requestSnapshot(job.requestId))) {
+        this.store.patch('workflowJobs', job.id, { status: 'superseded', error: '요청의 작업 상태가 변경되었습니다.' }); continue;
+      }
+      const member = task ? this.workflow.reviewer(task) : this.store.list('members').find(item => item.role === 'ceo');
+      if (!member) {
+        this.store.patch('workflowJobs', job.id, { status: 'blocked', error: '검토할 팀장 또는 TARS가 없습니다.' });
+        if (task) this.store.patch('tasks', task.id, { status: 'blocked', error: '검토할 팀장 또는 TARS가 없습니다.' });
+        continue;
+      }
+      if (member.status === 'running' || [...this.active.values()].some(run => run.memberId === member.id)) continue;
+      if (task && this.store.list('sessions').some(item => item.taskId === task.id && ['preparing', 'running', 'stopping'].includes(item.status))) continue;
+      try {
+        if (task) await assertCurrentArtifacts(this.store, task, this.store.require('taskReports', job.reportId));
+        if (this.store.require('workflowJobs', job.id).status !== 'queued' || this.closing || (request && this.store.require('requests', request.id).paused)) continue;
+        const { session, control } = this.store.transaction(() => {
+          const run = this.begin(member, job.kind, { taskId: job.taskId || null, requestId: job.requestId,
+            projectId: task?.projectId || request?.projectId || null, reviewReportId: job.reportId || null,
+            workflowJobId: job.id, conversationId: request?.conversationId || null,
+            prompt: task ? `${task.title}의 결과를 검토하세요.` : `${request.title} · ${job.kind === 'request_report' ? '최종 결과 보고' : '차단 사항 보고'}` });
+          this.store.patch('workflowJobs', job.id, { status: 'running', sessionId: run.session.id, memberId: member.id, error: null });
+          if (task) this.store.patch('tasks', task.id, { reviewerId: member.id });
+          return run;
+        });
+        control.promise = this.run(session, member, control);
+      } catch (error) {
+        this.store.patch('workflowJobs', job.id, { status: 'blocked', error: error.message });
+        if (task) this.store.patch('tasks', task.id, { status: 'blocked', error: error.message });
+      }
+    }
+  }
+  pumpFollowup(job, request) {
+    const member = this.store.get('members', job.memberId);
+    const source = this.store.get('sessions', job.sourceSessionId);
+    if (!member || !source || source.memberId !== member.id || !['ceo', 'leader'].includes(member.role)) {
+      this.store.patch('workflowJobs', job.id, { status: 'blocked', error: '원래 담당 AI 또는 세션이 없습니다.' }); return;
+    }
+    if (request.followupJobId !== job.id) {
+      this.store.patch('workflowJobs', job.id, { status: 'superseded', error: '새 사용자 의견으로 대체되었습니다.' }); return;
+    }
+    if (member.status === 'running' || [...this.active.values()].some(run => run.memberId === member.id)) return;
+    try {
+      const approval = this.store.require('workApprovals', job.approvalId);
+      const { session, control } = this.store.transaction(() => {
+        const run = this.begin(member, 'user_followup', { requestId: request.id, projectId: request.projectId,
+          workflowJobId: job.id, approvalId: approval.id, continuationOf: source.id,
+          freshContinuation: Boolean(job.freshContinuation), previousAttemptId: job.previousAttemptId || null,
+          conversationId: source.conversationId || null, initiatedBy: 'user',
+          prompt: `${approval.kind === 'plan' ? '협의안' : '결과 보고'} v${approval.version} · ${approval.response.decision === 'approve' ? '사용자 승인' : '추가 의견'}\n${approval.response.comment}` });
+        this.store.patch('workflowJobs', job.id, { status: 'running', sessionId: run.session.id, error: null });
+        return run;
+      });
+      control.promise = this.run(session, member, control);
+    } catch (error) { this.store.patch('workflowJobs', job.id, { status: 'blocked', error: error.message }); }
+  }
+  finishFollowup(session) {
+    const store = this.store;
+    const job = store.require('workflowJobs', session.workflowJobId);
+    const approval = store.require('workApprovals', job.approvalId);
+    const request = store.require('requests', session.requestId);
+    if (job.status !== 'running' || request.paused || request.followupJobId !== job.id) return;
+    store.transaction(() => {
+      store.patch('workflowJobs', job.id, { status: 'done' });
+      store.patch('requests', request.id, { followupJobId: null });
+      if (approval.kind === 'report' && approval.response.decision === 'approve') return;
+      const submitted = request.pendingApprovalId && store.get('workApprovals', request.pendingApprovalId);
+      if (submitted?.sourceSessionId === session.id) return;
+      const changed = this.workflow.approvals.scopeSignature(request.id) !== digest(approval.kind === 'plan' ? approval.snapshot
+        : Object.fromEntries(Object.entries(approval.snapshot).filter(([key]) => key !== 'report')));
+      if (changed || (approval.kind === 'plan' && approval.response.decision === 'feedback')) {
+        this.workflow.approvals.submitPlan(request.id, session.id, { force: true });
+      } else if (approval.kind === 'report' || !approval.snapshot.tasks.length) {
+        const current = store.require('sessions', session.id);
+        const document = store.put('documents', { title: `${request.title} · 의견 반영 보고`.slice(0, 200),
+          content: current.output, kind: 'report', requestId: request.id, projectId: request.projectId,
+          departmentId: null, sessionId: session.id, version: 1, revisions: [] });
+        store.patch('requests', request.id, { reportDocumentId: document.id });
+        store.patch('sessions', session.id, { documentIds: [document.id] });
+        this.workflow.approvals.submitReport(request.id, session.id, document.id);
+      } else {
+        for (const item of approval.snapshot.tasks) {
+          const task = store.require('tasks', item.id);
+          if (['draft', 'assigned'].includes(task.status) && task.assigneeId && task.acceptance?.trim()) this.workflow.queueTask(task.id, session.memberId);
+        }
+      }
+    });
   }
   async run(session, member, control) {
     const store = this.store;
     try {
       const task = session.taskId ? store.require('tasks', session.taskId) : null;
       const scope = session.provider === 'codex' ? await prepareScope(store, member, session.projectId) : memberDirectory(member);
-      const cwd = task ? await prepareWorkspace(store, task, member) : scope;
+      const cwd = task && session.kind === 'work' ? await prepareWorkspace(store, task, member) : scope;
+      await mkdir(cwd, { recursive: true });
       if (session.provider === 'codex') session.guidance = await prepareGuidance(store, member, session.projectId, cwd);
       // Reuse only the latest successfully completed conversation in this exact scope.
       // Never cross accounts/workspaces or silently replay a failed/interrupted mutation.
-      const previous = session.provider === 'codex' ? store.list('sessions').find(item => item.id !== session.id
-        && item.transport === 'app-server' && item.memberId === member.id && item.codexAccount === session.codexAccount
-        && item.kind === session.kind && item.projectId === session.projectId && item.taskId === session.taskId
-        && (item.conversationId || null) === (session.conversationId || null)
-        && item.workspace === cwd && item.model === session.model && item.reasoning === session.reasoning) : null;
+      const previous = !session.freshContinuation && (session.provider === 'codex' || session.continuationOf || isMemberChat(session)) ? continuationSource(store, session, cwd) : null;
       const unchanged = previous?.loadedGuidanceHash && previous.guidanceHash === session.guidance?.hash
         && previous.loadedGuidanceHash === await guidanceFilesHash([...(previous.instructionSources || []), ...(previous.availableSkills || []).map(skill => skill.path)]);
-      session.resumeThreadId = previous?.status === 'completed' && previous.providerTurnStatus === 'completed'
+      session.resumeThreadId = !workflowKinds.includes(session.kind) && previous?.status === 'completed' && previous.providerTurnStatus === 'completed'
         && unchanged ? previous.providerSessionId : null;
       // CEO chat history is scoped by conversation; the member summary may belong to an older chat or another project.
-      const includeSummary = session.kind !== 'ceo_chat';
-      const context = await contextFor(store, member, session.projectId, task?.documentIds || [], { includeSummary: session.provider !== 'codex' && includeSummary });
+      const context = await contextFor(store, member, session.projectId, task?.documentIds || [], { includeSummary: false });
       const contextHash = createHash('sha256').update(context).digest('hex');
+      session.resumeClaudeId = session.provider === 'claude' && (session.continuationOf || isMemberChat(session)) && previous?.contextHash === contextHash
+        ? previous.providerSessionId || null : null;
       let prompt = session.resumeThreadId && previous.contextHash === contextHash
         ? '' : context ? `작업 참고 자료:\n${context}` : '';
-      if (session.provider === 'codex' && !session.resumeThreadId && includeSummary && member.summary) prompt += `\n\n이전 작업 인계 요약:\n${member.summary.slice(-2000)}`;
-      store.patch('sessions', session.id, { workspace: cwd, resumeThreadId: session.resumeThreadId, contextHash,
+      prompt += `\n\nTARS 실행 ID: ${session.id}\n연결된 업무 ID(requestId): ${session.requestId || '없음: 아직 업무로 등록하지 않은 대화'}\nTARS 관리 도구로 변경할 때 executionToken 인수에 다음 값을 넣으세요: ${session.processToken}\n이 값은 실행 신원이며 결과 보고나 문서에 기록하지 마세요. 대화 한 턴은 업무가 아닙니다. 질문·현황 조회·일반 대화에는 업무를 만들지 마세요. 실제 수행할 목표와 범위가 정해지면 팀장 또는 CEO가 tars_register_work로 업무 제목과 instruction을 등록하고 반환된 ID에 문서와 하위 작업을 연결하세요. 기존 업무의 후속 협의라면 tars_register_work에 기존 requestId를 넣어 연결하고 중복 등록하지 마세요. 업무 등록은 실행 승인과 별개이며 사용자의 계획만·수정 금지 조건을 지키세요. 팀원 결과는 자동으로 팀장 검토와 TARS 보고로 이어집니다. 생성된 DB·업무 기록 파일을 직접 편집하지 마세요.`;
+      store.patch('sessions', session.id, { workspace: cwd, resumeThreadId: session.resumeThreadId, resumeClaudeId: session.resumeClaudeId, contextHash,
         ...(session.guidance ? { guidanceHash: session.guidance.hash, expectedInstructionSources: session.guidance.expectedSources,
           expectedSkills: session.guidance.skills, guidanceStatus: 'prepared' } : {}) });
-      if (task) {
-        const dependencies = task.dependsOn.map(key => store.require('tasks', key)).map(t => `${t.title}: ${(t.report || '').slice(0, 3000)}`);
-        prompt += `\n\n작업: ${task.title}\n${task.description}\n완료 기준: ${task.acceptance}\n실제 작업 디렉토리: ${cwd}\n선행 작업 결과:\n${dependencies.join('\n')}\n원본 경로는 수정하지 말고 현재 작업 디렉토리에서만 수정하세요. 커밋과 푸시는 하지 마세요. 최종 답변은 결과, 변경 파일, 수행한 검증, 미검증 사항, 남은 문제와 후속 작업 제안을 Markdown으로 보고하세요.`;
+      if (session.kind === 'user_followup') {
+        const approval = store.require('workApprovals', session.approvalId);
+        const source = store.require('sessions', session.continuationOf);
+        const directory = join(DATA, 'sessions', session.id);
+        await mkdir(directory, { recursive: true });
+        const path = join(directory, 'user-feedback.json');
+        const attempt = session.previousAttemptId && store.get('sessions', session.previousAttemptId);
+        await writeFile(path, JSON.stringify({ approval, original: { sessionId: source.id, prompt: source.prompt, output: source.output },
+          previousAttempt: attempt ? { sessionId: attempt.id, output: attempt.output, status: attempt.status, error: attempt.progress } : null }, null, 2), { mode: 0o600 });
+        store.patch('sessions', session.id, { continuationMode: session.resumeThreadId || session.resumeClaudeId ? 'resuming' : 'context', feedbackPath: path });
+        prompt += `\n\n사용자가 업무 기록에서 남긴 응답을 처리합니다. 원래 담당자: ${member.name}\n원본 실행: ${source.id}\n협의안·보고서의 고정된 원문과 사용자 응답: ${path}\n이 파일을 먼저 읽으세요. previousAttempt가 있으면 이전 후속 실행이 일부 처리했을 수 있으므로 저장 상태와 결과를 대조하고 이미 수행한 변경을 반복하지 마세요. ${session.prompt}\n업무 ID는 ${session.requestId}입니다. 다른 업무나 새 요청을 만들지 마세요. 기존 문서·작업을 수정할 때 버전과 ID를 유지하고 관리 API로 갱신하세요.\n${approval.response.decision === 'feedback'
+          ? '사용자 의견을 반영해 협의안 또는 결과 보고를 보완하세요. 승인 전에는 새 작업을 실행하거나 소스를 수정하지 마세요. 목표·범위·담당·완료 기준을 바꿨으면 변경된 협의안을 다시 제출합니다. 마지막 답변에는 반영 내용, 남은 질문과 변경한 문서·작업을 보고하세요.'
+          : approval.kind === 'plan' ? '사용자가 이 버전의 협의안을 승인했습니다. 승인된 범위의 배정·실행을 이어가세요. 범위를 변경하면 다시 사용자 승인이 필요합니다. 아직 실행하지 않은 승인된 작업은 이 응답 종료 후 대기열에 등록됩니다.'
+            : approval.snapshot.report.final ? '사용자가 결과 보고를 최종 확인했습니다. 승인 접수와 완료 내용을 짧게 알리세요. 이 실행은 확인 답변만 작성하며 문서·작업·소스를 변경하거나 새로운 작업을 시작하지 마세요.' : '사용자가 진행·차단 보고를 확인했습니다. 확인 접수와 남아 있는 사항을 짧게 알리세요. 업무가 완료되었다고 표현하지 마세요. 이 실행에서는 문서·작업·소스를 변경하거나 새 작업을 시작하지 마세요.'}`;
+      } else if (session.kind === 'task_review') {
+        const report = store.require('taskReports', session.reviewReportId);
+        await assertCurrentArtifacts(store, task, report);
+        prompt += `\n\n결과 검토 대상: ${task.title}\n작업 ID: ${task.id}\n결과 ID: ${report.id} · v${report.version}\n지시: ${task.description}\n완료 기준: ${task.acceptance || '없음: 완료 판정 불가'}\n산출물 작업 폴더: ${task.workspace}\n변경 패치: ${report.artifacts.patchPath || '해당 없음'}\n전체 업무 기록: ${taskRecordPath(task.id)}\n보고 내용:\n${report.content.slice(0, 20000)}\n\n완료 기준 목록: ${JSON.stringify(report.criteria)}\n실제 산출물과 검증 근거를 확인하고 모든 완료 기준의 ID(C1 등)를 criterion으로 사용해 checks를 작성하세요. 보고서의 성공 주장만으로 승인하지 마세요. 부족하면 rework와 구체적인 reworkInstructions, 외부 결정이 필요하면 blocked를 반환하세요. 필수 검증을 하지 못했으면 not_verified입니다. 작업 파일과 업무 상태를 직접 수정하지 말고 판정 JSON을 반환하세요. accepted는 모든 완료 기준과 요청한 통합·배포·장비 검증까지 근거가 확인된 경우에만 사용하세요. knowledge에는 검토로 확인한 재사용 가능한 결론과 적용 범위만 적으세요.`;
+      } else if (['request_report', 'request_escalation'].includes(session.kind)) {
+        const request = store.require('requests', session.requestId);
+        const job = store.require('workflowJobs', session.workflowJobId);
+        const snapshot = job.snapshot.map(item => ({ ...item, recordPath: taskRecordPath(item.id),
+          result: item.acceptedReportId ? store.get('taskReports', item.acceptedReportId)?.content : null,
+          review: store.list('taskReviews').find(review => review.reportId === item.acceptedReportId) || null }));
+        const directory = join(DATA, 'sessions', session.id);
+        await mkdir(directory, { recursive: true });
+        const path = join(directory, 'request-snapshot.json');
+        await writeFile(path, JSON.stringify({ request, tasks: snapshot }, null, 2), { mode: 0o600 });
+        prompt += `\n\n사용자의 원래 요청: ${request.instruction}\n보고 대상 전체 ${snapshot.length}개 작업의 고정된 결과: ${path}\n이 파일과 필요한 작업 기록을 읽고 요청 범위 대비 결과, 검토된 근거, 미완료·취소·미검증, 필요한 사용자 결정을 보고하세요. 업무를 새로 실행하거나 상태를 바꾸지 말고 보고만 작성하세요. 결과가 없는 완료 상태는 이전 기록으로 표시하세요. ${session.kind === 'request_escalation' ? '차단 원인과 다음 선택지를 중심으로 작성하세요.' : '원래 요청에서 빠진 항목이 있으면 완료로 표현하지 마세요.'}`;
+      } else if (task) {
+        const dependencies = task.dependsOn.map(key => store.require('tasks', key)).map(t => `${t.title} (${t.acceptedReportId ? '검토된 결과' : '이전 결과 · 검토 기록 없음'}): ${(t.report || '').slice(0, 3000)}`);
+        prompt += `\n\n작업: ${task.title}\n${task.description}\n완료 기준: ${task.acceptance}\n실제 작업 디렉토리: ${cwd}\n선행 작업 결과:\n${dependencies.join('\n')}\n기본 작업 위치는 위 작업 디렉토리입니다. 사용자 요청에 필요한 파일 수정·명령·네트워크·검증과 도구 사용을 직접 수행하세요. 원본 반영·커밋·푸시·배포는 사용자 요청 범위와 프로젝트 지침에 따라 처리하세요. 최종 답변은 결과, 변경 파일, 수행한 검증, 미검증 사항, 남은 문제와 후속 작업 제안을 Markdown으로 보고하세요.`;
         prompt += `\n\n${reportInstructions}\n이 실행의 지시·task·보고·상태 변경은 TARS가 실행 ${session.id}의 이력으로 보관합니다.`;
-      } else if (session.kind === 'ceo_chat') {
-        prompt += `\n\n${await ceoContext(store, session.projectId, cwd)}\n\n${ceoConversation(store, session, { includeHistory: !session.resumeThreadId })}`;
+        prompt += `\n\n이전 보완 지시: ${task.reworkInstructions || '없음'}\n전체 작업 기록: ${taskRecordPath(task.id)}\n결과는 지정 JSON 스키마로 반환하세요. summary, workPerformed, artifacts(파일 경로·설명), verification(완료 기준·passed/failed/not_run·증거), remaining, followUp을 실제 수행 내용으로 채우세요. 없는 목록은 빈 배열입니다. 검증 로그 등 근거 파일도 artifacts에 포함하세요. 결과 제출은 완료 판정이 아니며 팀장이 검토합니다.`;
+      } else if (isMemberChat(session)) {
+        if (member.role === 'ceo') prompt += `\n\n${await ceoContext(store, session.projectId, cwd)}`;
+        prompt += `\n\n${await memberConversationContext(store, session, { previous, resumed: Boolean(session.resumeThreadId || session.resumeClaudeId) })}`;
       } else if (session.kind === 'oversight') {
         prompt += `\n\n${await ceoContext(store, session.projectId, cwd)}\n\n사용자 요청:\n${session.prompt}\n\n결과는 현황 요약, 프로젝트별 상태, 차단 사항과 담당 팀장, 우선순위, 필요한 사용자 결정을 포함한 Markdown으로 작성하세요.`;
       } else if (session.kind === 'plan') {
         const team = store.list('members').filter(m => m.departmentId === member.departmentId && m.role === 'member');
         const docs = store.list('documents').filter(d => d.departmentId === member.departmentId && d.projectId === session.projectId && ['agreement', 'specification'].includes(d.kind)).slice(0, 2);
-        prompt += `\n\n사용자 요청:\n${session.prompt}\n\n최근 협의 문서:\n${docs.map(d => d.content.slice(0, 6000)).join('\n\n')}\n\n팀원 명단:\n${JSON.stringify(team.map(m => ({ id: m.id, name: m.name, specialty: m.specialty, model: m.model, provider: m.provider, codexAccount: m.provider === 'codex' ? m.codexAccount || 'codex' : null })))}\n\n협의 및 설계만 수행하세요. 사용자와 합의되지 않은 사항은 미결로 명시하세요. agreement는 목적, 범위, 합의, 제약, 미결, 완료 기준을 포함하는 Markdown입니다. specification은 구성, 흐름, 인터페이스, 오류 처리, 의존성, 검증 계획을 포함하는 Markdown입니다. tasks의 assigneeId는 위 팀원 ID 또는 null입니다. dependsOn은 tasks 배열의 앞선 항목 인덱스(0부터)만 사용하세요. 최대 20개 작업을 제안하고 실행하지 마세요. JSON 스키마에 맞게 결과를 반환하세요.`;
+        prompt += `\n\n사용자 요청:\n${session.prompt}\n\n최근 협의 문서:\n${docs.map(d => d.content.slice(0, 6000)).join('\n\n')}\n\n팀원 명단:\n${JSON.stringify(team.map(m => ({ id: m.id, name: m.name, specialty: m.specialty, model: m.model, provider: m.provider, codexAccount: m.provider === 'codex' ? m.codexAccount || 'codex' : null })))}\n\n질문·현황 조회·일반 대화에는 summary로 답하고 work는 null, agreement와 specification은 빈 문자열, tasks는 빈 배열로 반환하세요. 실제 업무의 목표와 범위를 정리했다면 work에 업무 제목(title), 목표·범위(instruction), 기존 업무 ID(requestId, 새 업무면 null)를 반환해 등록하세요. 도구로 이미 등록한 업무는 같은 requestId를 사용하세요. 업무 등록 후 협의와 설계를 정리하고 사용자 요청에 필요한 조직 변경·구현·배정·실행도 수행할 수 있습니다. 사용자와 합의되지 않은 사항은 미결로 명시하세요. agreement는 목적, 범위, 합의, 제약, 미결, 완료 기준을 포함하는 Markdown입니다. specification은 구성, 흐름, 인터페이스, 오류 처리, 의존성, 검증 계획을 포함하는 Markdown입니다. tasks의 assigneeId는 위 팀원 ID 또는 null입니다. dependsOn은 tasks 배열의 앞선 항목 인덱스(0부터)만 사용하세요. tasks에는 아직 등록하지 않은 작업만 최대 20개 반환하세요. 관리 도구로 이미 등록·실행한 작업은 summary에 ID와 결과를 기록하고 tasks에는 중복으로 넣지 마세요. JSON 스키마에 맞게 결과를 반환하세요.`;
       } else {
         const tasks = store.list('tasks').filter(t => t.departmentId === member.departmentId && (!session.projectId || t.projectId === session.projectId));
         prompt += `\n\n보고 요청: ${session.prompt}\n전체 ${tasks.length}개 중 최근 24개 작업 현황:\n${JSON.stringify(tasks.slice(0, 24).map(t => ({ title: t.title, status: t.status, report: (t.report || '').slice(0, 1500), error: t.error, assigneeId: t.assigneeId, integratedAt: t.integratedAt })))}\n현재 기록을 근거로 결과 요약, 담당자별 완료/미완료, 산출물, 통합 상태, 검증 여부, 차단 사항을 Markdown으로 보고하세요. 보고 대상이 일부이면 그 범위를 명시하세요. 검증하지 않은 결과를 성공으로 단정하지 마세요.`;
@@ -193,46 +356,76 @@ export class Orchestrator {
       }
       if (control.cancelled) throw new Error('실행 준비 중 취소되었습니다.');
       let lastProgress = 0;
-      const handle = await launch({ session, member, cwd, prompt,
+      const handle = await this.launchRun({ session, member, cwd, prompt,
         codexServers: this.codexServers,
         minutes: store.get('settings', 'main').maxSessionMinutes,
         onSpawn: pid => store.patch('sessions', session.id, { pid, status: 'running', workspace: cwd, lastActivityAt: now(), progress: 'AI 응답 대기 중' }),
         onIdentity: values => store.patch('sessions', session.id, { ...values, lastActivityAt: now(),
           ...(control.cancelled ? { status: 'stopping', progress: '중지 요청을 처리 중입니다.' } : {}) }),
         onEvent: (progress, extra = {}) => {
-          if (typeof extra.output === 'string' || Date.now() - lastProgress > 1000) {
-            store.patch('sessions', session.id, { progress: control.cancelled ? '중지 요청을 처리 중입니다.' : progress, lastActivityAt: now(),
+          if (extra.activity || typeof extra.output === 'string' || Date.now() - lastProgress > 1000) {
+            store.transaction(() => store.patch('sessions', session.id, { progress: control.cancelled ? '중지 요청을 처리 중입니다.' : progress, lastActivityAt: now(),
+              ...(extra.activity ? saveSessionActivity(store, session.id, extra.activity) : {}),
               ...(extra.activityNote ? { activityNote: extra.activityNote.slice(0, 1000) } : {}),
-              ...(typeof extra.output === 'string' ? { output: extra.output.slice(-80000) } : {}) }); lastProgress = Date.now();
+              ...(typeof extra.output === 'string' ? { output: extra.output.slice(-80000) } : {}) })); lastProgress = Date.now();
           }
         },
       });
       control.handle = handle;
       if (control.cancelled) handle.cancel();
       const result = await handle.promise;
-      store.patch('sessions', session.id, { output: result.output, providerSessionId: result.providerSessionId, logPath: result.logPath,
-        providerTurnId: result.providerTurnId, providerTurnStatus: result.providerTurnStatus });
+      store.transaction(() => store.patch('sessions', session.id, { output: result.output, providerSessionId: result.providerSessionId, logPath: result.logPath,
+        ...(result.activity ? saveSessionActivity(store, session.id, result.activity) : {}),
+        ...(result.activityNote ? { activityNote: result.activityNote.slice(0, 1000) } : {}),
+        providerTurnId: result.providerTurnId, providerTurnStatus: result.providerTurnStatus,
+        ...(session.continuationOf ? { continuationMode: result.providerSessionId && result.providerSessionId === (session.resumeThreadId || session.resumeClaudeId) ? 'resumed' : 'context' } : {}) }));
       if (result.failure || control.cancelled) throw new Error(result.failure || '실행이 취소되었습니다.');
+      if (session.kind === 'work') {
+        const report = await this.workflow.submit(session, result.structured || JSON.parse(result.output));
+        store.patch('sessions', session.id, { output: report.content, reportId: report.id });
+      }
+      if (session.kind === 'task_review') {
+        const review = await this.workflow.review(task.id, session.reviewReportId, result.structured || JSON.parse(result.output), member.id, session.id);
+        store.patch('sessions', session.id, { output: `${review.decision}\n\n${review.rationale}\n\n${review.reworkInstructions}`, reviewId: review.id });
+        await syncShared(store);
+      }
+      if (['request_report', 'request_escalation'].includes(session.kind)) {
+        const document = this.workflow.finishRequest(session.workflowJobId, session, result.output);
+        store.patch('sessions', session.id, { documentIds: document ? [document.id] : [], superseded: !document });
+        if (document) await syncShared(store);
+      }
       if (session.kind === 'plan') this.applyPlan(session, member, result.structured || JSON.parse(result.output));
+      if (['ceo_chat', 'member_chat', 'plan'].includes(session.kind)) {
+        const current = store.require('sessions', session.id);
+        for (const requestId of new Set([current.requestId, ...(current.requestIds || [])].filter(Boolean))) {
+          this.workflow.approvals.submitPlan(requestId, session.id);
+        }
+      }
+      if (session.kind === 'user_followup') this.finishFollowup(session);
       if (['review', 'oversight'].includes(session.kind)) {
         const document = store.put('documents', {
-          title: `${member.name} · ${session.kind === 'oversight' ? '프로젝트 총괄 보고' : '결과 보고'}`, kind: 'report', content: result.output, version: 1, revisions: [],
+          title: `${member.name} · ${session.kind === 'oversight' ? '프로젝트 총괄 보고' : '결과 보고'}`, kind: 'report', content: result.output, version: 1, revisions: [], requestId: session.requestId || null,
           projectId: session.projectId, departmentId: member.departmentId, sessionId: session.id,
         });
         store.patch('sessions', session.id, { documentIds: [document.id] });
+        if (session.requestId) {
+          store.patch('requests', session.requestId, { reportDocumentId: document.id });
+          this.workflow.approvals.submitReport(session.requestId, session.id, document.id);
+        }
       }
-      if (['plan', 'review', 'oversight'].includes(session.kind)) await syncShared(store);
-      if (task) store.patch('tasks', task.id, { status: 'review', report: result.output, error: null });
-      const summary = (store.require('sessions', session.id).output || result.structured?.summary || result.output).slice(-4000);
-      store.patch('members', member.id, { summary });
-      await writeFile(join(memberDirectory(member), 'context-summary.md'), summary);
+      if (['plan', 'review', 'oversight', 'ceo_chat', 'member_chat', 'user_followup'].includes(session.kind)) await syncShared(store);
       store.patch('sessions', session.id, { status: 'completed', endedAt: now(), progress: '작업 결과가 준비되었습니다.' });
       store.event(`${member.name} · 결과 도착`, { sessionId: session.id, taskId: task?.id, memberId: member.id });
     } catch (error) {
       store.patch('sessions', session.id, { status: control.cancelled ? 'cancelled' : 'failed', endedAt: now(), progress: error.message });
+      const job = session.workflowJobId ? store.require('workflowJobs', session.workflowJobId) : null;
       if (session.taskId) {
         const task = store.require('tasks', session.taskId);
-        store.patch('tasks', task.id, { status: task.status === 'cancelled' ? 'cancelled' : 'blocked', error: error.message });
+        const ownsOutcome = job ? job.status === 'running' : task.sessionId === session.id;
+        if (ownsOutcome && !task.automationPaused && !['done', 'cancelled'].includes(task.status)) store.patch('tasks', task.id, { status: 'blocked', error: error.message });
+      }
+      if (session.workflowJobId) {
+        if (job.status === 'running') store.patch('workflowJobs', job.id, { status: control.cancelled ? 'cancelled' : 'blocked', error: error.message });
       }
       store.event(`${member.name} · ${error.message}`, { sessionId: session.id, taskId: session.taskId, memberId: member.id, level: 'error' });
     } finally {
@@ -250,29 +443,52 @@ export class Orchestrator {
   }
   applyPlan(session, member, raw) {
     const plan = planSchema.parse(raw);
+    if (!plan.work) {
+      if (plan.tasks.length || plan.agreement.trim() || plan.specification.trim()) fail('업무 문서와 하위 작업에는 등록할 업무(work)가 필요합니다.', 400);
+      this.store.patch('sessions', session.id, { output: plan.summary });
+      return;
+    }
     const members = this.store.list('members').filter(m => m.departmentId === member.departmentId && m.role === 'member');
     for (const [index, task] of plan.tasks.entries()) {
       if (task.assigneeId && !members.some(m => m.id === task.assigneeId)) fail('팀장이 존재하지 않는 담당자를 반환했습니다.', 400);
       if (task.dependsOn.some(dep => dep >= index)) fail('팀장의 작업 의존 순서가 올바르지 않습니다.', 400);
     }
     this.store.transaction(() => {
-      const metadata = { projectId: session.projectId, departmentId: member.departmentId, sessionId: session.id, version: 1, revisions: [] };
-      const agreement = this.store.put('documents', { ...metadata, title: `${member.name} · 협의 문서`, kind: 'agreement', content: plan.agreement });
-      const spec = this.store.put('documents', { ...metadata, title: `${member.name} · 설계 사양`, kind: 'specification', content: plan.specification });
+      const current = this.store.require('sessions', session.id);
+      const request = this.workflow.registerRequest({ ...plan.work, projectId: session.projectId,
+        requestId: plan.work.requestId || current.requestId || null }, { actor: member.id, session: current });
+      if (plan.tasks.length) this.store.patch('requests', request.id, { status: 'open', reportDocumentId: null });
+      const metadata = { requestId: request.id, projectId: session.projectId, departmentId: member.departmentId, sessionId: session.id, version: 1, revisions: [] };
+      const documents = [
+        plan.agreement.trim() && this.store.put('documents', { ...metadata, title: `${request.title} · 협의 문서`, kind: 'agreement', content: plan.agreement }),
+        plan.specification.trim() && this.store.put('documents', { ...metadata, title: `${request.title} · 설계 사양`, kind: 'specification', content: plan.specification }),
+      ].filter(Boolean);
       const taskIds = plan.tasks.map(() => id());
       plan.tasks.forEach((task, index) => this.store.put('tasks', {
         ...task, id: taskIds[index], projectId: session.projectId, departmentId: member.departmentId,
         status: task.assigneeId ? 'assigned' : 'draft', priority: 'normal',
-        documentIds: [agreement.id, spec.id], dependsOn: task.dependsOn.map(dep => taskIds[dep]),
+        documentIds: documents.map(doc => doc.id), dependsOn: task.dependsOn.map(dep => taskIds[dep]),
         isolation: session.projectId ? 'worktree' : 'personal', createdBy: member.id, originSessionId: session.id,
+        requestId: request.id, reworkCount: 0, automationPaused: false,
       }, { actor: member.id }));
-      this.store.patch('sessions', session.id, { output: plan.summary, documentIds: [agreement.id, spec.id], taskIds });
+      this.store.patch('sessions', session.id, { output: plan.summary,
+        documentIds: [...new Set([...(current.documentIds || []), ...documents.map(doc => doc.id)])],
+        taskIds: [...new Set([...(current.taskIds || []), ...taskIds])] });
+      this.workflow.approvals.submitPlan(request.id, session.id);
     });
   }
   stop(sessionId, actor = 'user') {
     const control = this.active.get(sessionId);
     if (!control) fail('실행 중인 세션이 아닙니다.');
     control.cancelled = true;
+    const session = this.store.require('sessions', sessionId);
+    if (actor !== 'system') {
+      const task = session.taskId ? this.store.require('tasks', session.taskId) : null;
+      const job = session.workflowJobId ? this.store.require('workflowJobs', session.workflowJobId) : null;
+      if (task && !['done'].includes(task.status) && (!job || ['queued', 'running', 'cancelled'].includes(job.status))) this.workflow.pauseTask(task.id, actor, task.status === 'cancelled');
+      else if (!task) for (const requestId of new Set([session.requestId, ...(session.requestIds || [])].filter(Boolean))) this.workflow.pauseRequest(requestId);
+      if (job && ['queued', 'running', 'cancelled'].includes(job.status)) this.store.patch('workflowJobs', job.id, { status: 'cancelled', error: '사용자가 중지했습니다.' });
+    }
     this.store.patch('sessions', sessionId, { status: 'stopping', progress: '중지 요청을 처리 중입니다.' }, { actor });
     control.handle?.cancel();
   }

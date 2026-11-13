@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Boxes, Command, FileText, ListTodo, Plus, Users } from 'lucide-react';
+import { Boxes, Command, FileText, Plus, Users } from 'lucide-react';
 
 const POSITION_KEY = 'tars:create-corner';
 const CORNERS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
 const ACTIONS = [
   ['department', '부서 만들기', Users],
   ['member', 'AI 팀원 추가', Command],
-  ['task', '작업 만들기', ListTodo],
   ['document', '문서 작성', FileText],
   ['project', '프로젝트 등록', Boxes],
 ];

@@ -4,8 +4,8 @@ import { Check, ChevronRight, Code2, RotateCcw, Search, Zap } from 'lucide-react
 import { api } from './api';
 import { Field } from './ui';
 import { useWorkspace } from './App';
+import { reasoningOptions, reasoningAfterModelChange } from './model-options';
 
-const commonEfforts = ['low', 'medium', 'high'];
 const effortLabels = { default: 'Default', none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max', ultra: 'Ultra' };
 const effortDepths = { default: 0, none: 0, minimal: .05, low: .15, medium: .35, high: .55, xhigh: .72, max: .88, ultra: 1 };
 const stars = [
@@ -45,22 +45,19 @@ export function ModelFields({ initial = {} }) {
     staleTime: 60_000, retry: false, refetchOnWindowFocus: false,
   });
   const models = catalog.data?.models || [];
-  const selectedModel = models.find(item => item.id === model);
-  const supported = selectedModel?.reasoningEfforts;
-  const efforts = Array.isArray(supported) ? supported.filter(value => value !== 'default') : commonEfforts;
-  const unsupported = reasoning !== 'default' && Array.isArray(supported) && !efforts.includes(reasoning);
-  const extraEffort = reasoning !== 'default' && !efforts.includes(reasoning);
-  const levels = ['default', ...efforts, ...(extraEffort && !unsupported ? [reasoning] : [])];
+  const { selectedModel, efforts, levels, error: settingError, unknown } = reasoningOptions(provider, model, reasoning, catalog.data);
+  const unsupported = Boolean(settingError);
+  const automatic = provider === 'claude' && reasoning === 'default';
   const index = Math.max(0, levels.indexOf(reasoning));
   const progress = levels.length > 1 ? index / (levels.length - 1) : 0;
   const depth = unsupported ? 0 : effortDepths[reasoning] ?? progress;
   const starCount = Math.round(Math.max(0, (depth - .4) / .6) * stars.length);
   const quickEffort = efforts[0] || 'default';
-  const effortLabel = effortLabels[reasoning] || reasoning;
+  const effortLabel = automatic ? 'CLI 설정 사용' : effortLabels[reasoning] || reasoning;
   const modelLabel = selectedModel?.label || model || (custom ? '모델 ID 직접 입력' : 'CLI 기본 모델');
   const choices = [
     { id: '', label: 'CLI 기본 모델' },
-    ...(model && !selectedModel ? [{ id: model, label: model }] : []),
+    ...(model && !models.some(item => item.id === model) ? [{ id: model, label: model }] : []),
     ...models,
   ].filter(item => `${item.label} ${item.id}`.toLowerCase().includes(search.trim().toLowerCase()));
   const message = catalog.isPending ? '모델 목록을 불러오는 중…'
@@ -72,17 +69,19 @@ export function ModelFields({ initial = {} }) {
     setCustom(false);
     setMenuOpen(false);
     setSearch('');
-    // Reasoning is an independent choice; changing tools or models does not overwrite it.
+    setReasoning('default');
   }
   function chooseModel(value) {
+    if (models.find(item => item.id === value)?.disabled) return;
     setModel(value);
+    setReasoning(reasoningAfterModelChange(provider, value, reasoning, catalog.data));
     setCustom(false);
     setMenuOpen(false);
     trigger.current?.focus();
   }
   function navigateModels(event) {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-    const buttons = [...event.currentTarget.querySelectorAll('[data-model-choice]')];
+    const buttons = [...event.currentTarget.querySelectorAll('[data-model-choice]:not(:disabled)')];
     if (!buttons.length) return;
     const current = buttons.indexOf(event.target);
     if (current < 0 && ['Home', 'End'].includes(event.key)) return;
@@ -108,26 +107,27 @@ export function ModelFields({ initial = {} }) {
         <div className="model-power-heading">
           <button type="button" className={`model-power-quick ${reasoning === quickEffort ? 'active' : ''}`} disabled={!efforts.length} aria-label={`빠른 추론으로 전환: ${effortLabels[quickEffort] || quickEffort}`} title={`빠른 추론 · ${effortLabels[quickEffort] || quickEffort}`} onClick={() => setReasoning(quickEffort)}><Zap size={15} aria-hidden="true" /></button>
           <div className="model-power-current"><strong>{effortLabel}</strong><button ref={trigger} type="button" className="model-picker-trigger" title={modelLabel} aria-label={`모델 선택: ${modelLabel}`} aria-expanded={menuOpen} aria-controls={`${controlId}-menu`} onClick={() => { setSearch(''); setMenuOpen(value => !value); }}><span>{modelLabel}</span><ChevronRight size={12} /></button></div>
-          <button type="button" className="model-power-reset" aria-label="추론 깊이를 기본 설정으로 되돌리기" title="기본 추론 설정" disabled={reasoning === 'default'} onClick={() => setReasoning('default')}><RotateCcw size={15} /></button>
+          <button type="button" className="model-power-reset" aria-label="추론 깊이를 기본 설정으로 되돌리기" title="CLI 설정 사용" disabled={reasoning === 'default'} onClick={() => setReasoning('default')}><RotateCcw size={15} /></button>
         </div>
-        <div className="model-effort-range" style={{ '--effort-position': progress }}>
+        {automatic ? <div className="model-effort-auto"><span>{efforts.length ? '깊이를 지정하지 않고 CLI 설정을 따릅니다.' : '이 모델은 추론 단계 설정을 지원하지 않습니다.'}</span>{efforts.length > 0 && <button type="button" className="text-button" onClick={() => setReasoning(efforts.includes('high') ? 'high' : efforts[0])}>직접 선택</button>}</div>
+          : <div className="model-effort-range" style={{ '--effort-position': progress }}>
           <div className="model-effort-track" aria-hidden="true"><span className="model-effort-fill"><span className="model-effort-stars">{stars.map(([x, y, size], star) => <i key={star} style={{ left: `${x}%`, top: `${y}%`, width: size, height: size, opacity: star < starCount ? .8 : 0 }} />)}</span></span></div>
           <div className="model-effort-ticks" aria-hidden="true">{levels.map((value, position) => <i key={value} className={position <= index ? 'filled' : ''} />)}</div>
-          <input className="model-effort-slider" type="range" min={0} max={Math.max(1, levels.length - 1)} step={1} value={index} disabled={levels.length === 1 && !unsupported}
+          <input className="model-effort-slider" type="range" min={0} max={Math.max(1, levels.length - 1)} step={1} value={index} disabled={levels.length <= 1 && !unsupported}
             aria-label="추론 깊이" aria-valuetext={`${effortLabel}${unsupported ? ' · 이 모델에서 미지원' : ''}`} aria-describedby={`${controlId}-hint`} aria-invalid={unsupported || undefined}
-            ref={element => { element?.setCustomValidity(unsupported ? '선택한 모델에서 지원하는 추론 깊이를 선택하세요.' : ''); }}
+            ref={element => { element?.setCustomValidity(settingError || ''); }}
             onChange={event => setReasoning(levels[Number(event.target.value)] || 'default')} />
           <span className="model-effort-thumb" aria-hidden="true" />
-        </div>
+        </div>}
       </div>
       {menuOpen && <div className="model-picker-menu" id={`${controlId}-menu`} onKeyDown={navigateModels}>
         <div className="model-picker-search"><Search size={14} aria-hidden="true" /><input ref={searchInput} type="search" aria-label="모델 검색" placeholder="모델 이름 또는 ID 검색" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); if (choices.length === 1) chooseModel(choices[0].id); } }} /></div>
-        <ul className="model-picker-options" aria-label="모델 목록">{choices.map(item => <li key={item.id || 'cli-default'}><button type="button" data-model-choice className={item.id === model && !custom ? 'selected' : ''} aria-pressed={item.id === model && !custom} onClick={() => chooseModel(item.id)}><span><strong>{item.label}</strong><small>{item.id || 'CLI에 저장된 모델 사용'}</small></span>{item.id === model && !custom && <Check size={15} aria-hidden="true" />}</button></li>)}</ul>
+        <ul className="model-picker-options" aria-label="모델 목록">{choices.map(item => <li key={item.id || 'cli-default'}><button type="button" data-model-choice disabled={item.disabled} className={item.id === model && !custom ? 'selected' : ''} aria-pressed={item.id === model && !custom} onClick={() => chooseModel(item.id)}><span><strong>{item.label}</strong><small>{item.disabled ? '현재 사용 불가' : item.id || 'CLI에 저장된 모델 사용'}</small></span>{item.id === model && !custom && <Check size={15} aria-hidden="true" />}</button></li>)}</ul>
         {!choices.length && <p className="model-picker-empty">일치하는 모델이 없습니다.</p>}
         <button type="button" className="model-picker-custom" onClick={() => { setCustom(true); setMenuOpen(false); if (custom) customInput.current?.focus(); }}><Code2 size={14} />모델 ID 직접 입력</button>
       </div>}
     </div>
-    <p className={`model-effort-hint ${unsupported ? 'invalid' : ''}`} id={`${controlId}-hint`} role={unsupported ? 'alert' : undefined}>{unsupported ? `${effortLabel}은 선택한 모델에서 지원하지 않습니다. 슬라이더 또는 초기화 버튼으로 추론 깊이를 변경하세요.` : reasoning === 'default' ? '기본 추론 설정을 사용합니다. 모델명을 눌러 모델을 변경하세요.' : '슬라이더로 추론 깊이를 조절하고, 모델명을 눌러 모델을 변경하세요.'}</p>
+    <p className={`model-effort-hint ${unsupported ? 'invalid' : ''}`} id={`${controlId}-hint`} role={unsupported ? 'alert' : undefined}>{settingError || (reasoning === 'default' ? 'CLI 기본 설정은 최저 추론 단계가 아닙니다. 모델명을 눌러 모델을 변경하세요.' : provider === 'claude' && unknown ? '이 모델의 지원 단계는 확인되지 않았습니다. 선택값은 실행 시 CLI 설정에 따라 적용됩니다.' : '슬라이더로 추론 깊이를 조절하고, 모델명을 눌러 모델을 변경하세요.')}</p>
     <input type="hidden" name="reasoning" value={reasoning} />
     {custom ? <Field label="모델 ID"><input ref={customInput} name="model" value={model} onChange={event => setModel(event.target.value)} required maxLength={100} pattern=".*\S.*" placeholder="사용할 모델의 정확한 ID" /></Field>
       : <input type="hidden" name="model" value={model} />}

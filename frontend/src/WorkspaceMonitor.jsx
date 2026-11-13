@@ -151,7 +151,7 @@ export function Dashboard() {
   const total = visibleGroups.reduce((sum, group) => sum + group.rows.length, 0);
 
   return <div className="page dashboard workspace-monitor">
-    <div className="page-heading"><div><h1>워크스페이스</h1><p>팀과 담당자별로 현재 작업, 대기 사유와 실행 상황을 확인하세요.</p></div><button type="button" className="button primary" onClick={() => open('task')}><Plus size={16} />작업 만들기</button></div>
+    <div className="page-heading"><div><h1>워크스페이스</h1><p>팀과 담당자별로 현재 작업, 대기 사유와 실행 상황을 확인하세요.</p></div><Link to="/ceo" className="button primary"><Plus size={16} />TARS에게 지시하기</Link></div>
     <div className="toolbar monitor-toolbar">
       <label className="search-input"><Search size={16} /><input type="search" aria-label="작업, 팀원, 프로젝트 검색" placeholder="작업 · 팀원 · 프로젝트 검색" value={search} onChange={event => setSearch(event.target.value)} /></label>
       <select className="compact-select" aria-label="모니터링 부서" value={department} onChange={event => setDepartment(event.target.value)}><option value="all">전체 조직</option><option value="ceo">CEO · TARS</option>{data.departments.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}<option value="unassigned">소속 미지정</option></select>
@@ -165,9 +165,9 @@ export function Dashboard() {
       <div className="monitor-roster" aria-label={`${group.name} 담당자 현황`}>{[...group.members].sort((a, b) => Number(b.role === 'leader') - Number(a.role === 'leader')).map(member => {
         const session = work.activeByMember.get(member.id) || work.latestByMember.get(member.id);
         const active = Boolean(work.activeByMember.get(member.id));
-        return <button type="button" key={member.id} className={`monitor-member ${active ? 'is-live' : ''}`} disabled={!session} onClick={() => session && open('sessionDetail', session)} title={`${providerLabel(member)} · ${session ? '현재 또는 최근 실행 기록 보기' : '실행 기록 없음'}`}>
+        return <Link key={member.id} className={`monitor-member ${active ? 'is-live' : ''}`} to={`/sessions?member=${member.id}`} title={`${member.name}와 대화`}>
           <Avatar member={member} /><span><strong>{member.name}<small>{roleLabel(member)}</small></strong><span><i />{active ? labels[session.status] : '실행 중 작업 없음'}</span></span>
-        </button>;
+        </Link>;
       })}{!group.members.length && <span className="monitor-roster-empty"><Users size={14} />등록된 담당자가 없습니다.</span>}</div>
       {group.rows.length ? <div className="monitor-table-scroll" role="region" tabIndex={0} aria-label={`${group.name} 작업 목록`}><table className="monitor-table"><thead><tr><th scope="col">작업 · 요청</th><th scope="col">담당자</th><th scope="col">상태</th><th scope="col">현재 진행 상황</th><th scope="col">실행 기록</th></tr></thead><tbody>{group.rows.map(row => <WorkRow key={row.id} row={row} work={work} settings={data.settings} now={now} open={open} />)}</tbody></table></div>
         : <p className="monitor-team-empty">현재 조건에 해당하는 진행 작업이 없습니다.</p>}

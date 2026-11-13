@@ -28,3 +28,17 @@
 .execution-attempts strong { font-size: 11px; overflow-wrap: anywhere; }
 .execution-attempts small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .monitor-timing .activity-stale { color: var(--danger, #ef777b); }
+.request-list { margin: 18px 0; padding: 16px; border: 1px solid var(--line); border-radius: 5px; }
+.request-list > h2 { font-size: 14px; margin-bottom: 12px; }
+.request-record { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.request-record summary { cursor: pointer; font-size: 12px; line-height: 1.8; }
+.request-record .markdown { margin-top: 12px; }
+.request-tasks { display: grid; gap: 8px; margin: 12px 0; }
+.request-tasks button { justify-content: space-between; text-align: left; }
+.workflow-jobs { display: grid; gap: 8px; margin: 12px 0; font-size: 12px; }
+.workflow-jobs > div { padding: 10px; border: 1px solid var(--line); }
+.workflow-jobs button { margin: 5px 12px 0 0; }
+.task-review-result { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 8px; }
+.task-review-result li { font-size: 12px; margin: 10px 0; }
+.task-review-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-results form { margin-top: 14px; }

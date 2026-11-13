@@ -1,10 +1,12 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DATA, id } from './store.js';
-import { planJsonSchema } from './contracts.js';
+import { outputSchemaFor } from './contracts.js';
 import { createTerminalRecorder } from './terminal.js';
 import { appServerTransport } from './app-server-transport.js';
 import { inspectLoadedGuidance } from './guidance.js';
+import { CODEX_THREAD_ACCESS, CODEX_TURN_ACCESS } from './agent-access.js';
+import { createSessionActivity } from './session-activity.js';
 
 export class CodexAppServers {
   constructor(store, killOwned) {
@@ -35,7 +37,7 @@ export class CodexAppServers {
         cwd: DATA, processToken,
         onSpawn: pid => this.store.put('appServerProcesses', { id: account, pid, processToken }),
         onNotification: (method, params) => listeners.get(params.threadId)?.event(method, params),
-        onRequest: (method, params) => listeners.get(params.threadId)?.request(method),
+        onRequest: (method, params, granted) => listeners.get(params.threadId)?.request(method, granted),
         onFailure: error => { for (const listener of listeners.values()) listener.failed(error); },
       });
       entry = { rpc, listeners };
@@ -58,6 +60,7 @@ export class CodexAppServers {
     let timeout, interruptTimer, progressTimer, pendingProgress;
     let acceptingTurn = false, ownsListener = false, receivedBytes = 0;
     const messages = new Map();
+    const activity = createSessionActivity();
     let resolveTurn;
     const finished = new Promise(resolve => { resolveTurn = resolve; });
     const directory = join(DATA, 'sessions', session.id);
@@ -104,6 +107,10 @@ export class CodexAppServers {
       if (!eventTurnId || (turnId && eventTurnId !== turnId)) return;
       rememberTurn(eventTurnId);
       terminal.appServerEvent(method, params);
+      if (activity.event(method, params)) {
+        const snapshot = activity.snapshot();
+        notify(snapshot.current || '다음 작업을 준비하고 있습니다.', { activity: snapshot });
+      }
       if (method === 'item/agentMessage/delta') {
         const delta = typeof params.delta === 'string' ? params.delta : '';
         receivedBytes += Buffer.byteLength(delta);
@@ -118,10 +125,6 @@ export class CodexAppServers {
         if (params.item.phase === 'final_answer') finalOutput = output;
         messages.delete(params.item.id);
         notify('응답을 작성했습니다.', { output, ...(params.item.phase === 'commentary' ? { activityNote: output.slice(0, 1000) } : {}) });
-      }
-      if (method === 'item/started') {
-        const names = { commandExecution: '명령 실행', fileChange: '파일 수정', mcpToolCall: '도구 호출', webSearch: '검색', contextCompaction: '대화 문맥 압축' };
-        if (names[params.item?.type]) notify(`작업 중: ${names[params.item.type]}`, { output });
       }
       if (method === 'error') {
         const message = String(params.error?.message || 'Codex 실행 오류').slice(0, 2000);
@@ -147,7 +150,7 @@ export class CodexAppServers {
         // Refresh discovery before creating/resuming the thread's skill context.
         const listed = await entry.rpc.call('skills/list', { cwds: [cwd], forceReload: true });
         if (stopped) throw new Error(failure);
-        const configuration = { cwd, approvalPolicy: 'never', sandbox: session.kind === 'work' ? 'workspace-write' : 'read-only', model: member.model || null };
+        const configuration = { cwd, ...CODEX_THREAD_ACCESS, model: member.model || null };
         const previousId = session.resumeThreadId;
         const response = await entry.rpc.call(previousId ? 'thread/resume' : 'thread/start', {
           ...configuration, ...(previousId ? { threadId: previousId, excludeTurns: true } : {}),
@@ -172,7 +175,8 @@ export class CodexAppServers {
         if (stopped) throw new Error(failure);
         entry.listeners.set(threadId, {
           event,
-          request: method => {
+          request: (method, granted) => {
+            if (granted) { terminal.write('PERMISSION', `최대 권한 정책으로 허용: ${method}`); return; }
             terminal.write('BLOCKED', `지원하지 않는 추가 승인/입력 요청: ${method}`);
             cancel(`추가 승인 또는 입력이 필요하여 중단했습니다: ${method}`);
           },
@@ -181,12 +185,10 @@ export class CodexAppServers {
         ownsListener = true;
         acceptingTurn = true;
         const started = await entry.rpc.call('turn/start', {
-          threadId, input: [{ type: 'text', text: prompt }], cwd, approvalPolicy: 'never',
-          sandboxPolicy: session.kind === 'work'
-            ? { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false }
-            : { type: 'readOnly' },
+          threadId, input: [{ type: 'text', text: prompt }], cwd, ...CODEX_TURN_ACCESS,
           model: member.model || null, effort: session.reasoning === 'default' ? null : session.reasoning,
-          ...(session.kind === 'plan' ? { outputSchema: planJsonSchema } : {}),
+          summary: 'auto',
+          ...(outputSchemaFor(session.kind) ? { outputSchema: outputSchemaFor(session.kind) } : {}),
         });
         if (!started?.turn?.id || (turnId && turnId !== started.turn.id)) {
           await entry.rpc.close(new Error('App Server의 turn ID를 확인하지 못해 실행 연결을 종료했습니다.'));
@@ -210,10 +212,12 @@ export class CodexAppServers {
         if (entry?.rpc.failed) await entry.rpc.closed;
         output = finalOutput ?? output;
         if (!output && !failure) failure = 'Codex가 결과를 반환하지 않았습니다.';
+        activity.finish(stopped || providerTurnStatus === 'interrupted' ? 'interrupted' : failure ? 'failed' : 'completed');
         terminal?.write(failure ? 'ERROR' : 'DONE', failure || '응답 완료');
         await terminal?.flush();
       }
-      return { output, structured: null, providerSessionId: threadId, providerTurnId: turnId, providerTurnStatus, failure, stopped, logPath };
+      return { output, structured: null, providerSessionId: threadId, providerTurnId: turnId, providerTurnStatus, failure, stopped, logPath,
+        activity: activity.snapshot(), activityNote: pendingProgress?.extra.activityNote };
     })();
     return {
       promise, cancel,

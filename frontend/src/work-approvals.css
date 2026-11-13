@@ -1,0 +1,16 @@
+.work-approvals { margin: 20px 0; min-width: 0; }
+.work-approvals > h3 { display: flex; align-items: center; gap: 7px; font-size: 1rem; }
+.work-approval { border: 1px solid var(--line); margin: 10px 0; overflow-wrap: anywhere; }
+.work-approval.pending { border-color: var(--accent, #54bf83); }
+.work-approval > summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 14px; cursor: pointer; }
+.work-approval summary small { color: var(--muted); }
+.work-approval-body { padding: 0 16px 16px; }
+.work-approval-body details { margin: 12px 0; }
+.work-approval-body details > summary { cursor: pointer; }
+.approval-response { display: grid; gap: 10px; margin-top: 18px; }
+.approval-response textarea { width: 100%; min-height: 85px; box-sizing: border-box; }
+.approval-user-response { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+.approval-continuation { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+.approval-continuation .form-error { flex-basis: 100%; }
+.badge.awaiting_approval, .badge.awaiting_acceptance, .badge.revision_requested { color: #f0b44b; }
+.badge.accepted { color: #54bf83; }

@@ -6,7 +6,7 @@ const reference = z.string().uuid();
 // Codex advertises effort names per model; retain those values independently of model IDs.
 const reasoning = z.string().trim().min(1).max(32).regex(/^[a-z][a-z0-9_-]*$/);
 export const codexAccountSchema = z.enum(['codex', 'codex2']);
-export const departmentSchema = z.object({ name: text, description: optionalText });
+export const departmentSchema = z.object({ name: text, description: optionalText, projectId: reference.nullable().default(null) });
 export const memberSchema = z.object({
   name: text, departmentId: reference, role: z.enum(['leader', 'member']),
   provider: z.enum(['codex', 'claude']), model: z.string().trim().max(100).default(''),
@@ -31,14 +31,24 @@ export const taskSchema = z.object({
   dependsOn: z.array(reference).max(30).default([]),
   documentIds: z.array(reference).max(10).default([]),
   isolation: z.enum(['worktree', 'copy', 'personal']).default('worktree'),
+  requestId: reference.nullable().optional(),
 });
 export const settingsSchema = z.object({
   maxConcurrent: z.number().int().min(1).max(8),
   maxSessionMinutes: z.number().int().min(1).max(180),
-  menuOrder: z.array(z.enum(['/', '/ceo', '/projects', '/organization', '/consult', '/tasks', '/sessions', '/library', '/usage']))
-    .max(9).refine(order => new Set(order).size === order.length, '메뉴 순서에 중복 항목이 있습니다.'),
+  maxReworkAttempts: z.number().int().min(0).max(5),
+  menuOrder: z.array(z.enum(['/', '/ceo', '/requests', '/projects', '/organization', '/consult', '/tasks', '/sessions', '/library', '/usage']))
+    .max(10).refine(order => new Set(order).size === order.length, '메뉴 순서에 중복 항목이 있습니다.'),
 }).partial().strict().refine(value => Object.keys(value).length > 0, '변경할 설정이 필요합니다.');
-export const consultationSchema = z.object({ leaderId: reference, projectId: reference.nullable().default(null), prompt: z.string().trim().min(1).max(16000) });
+export const workRequestSchema = z.object({
+  title: text, instruction: z.string().trim().min(1).max(16000),
+  projectId: reference.nullable().default(null), requestId: reference.nullable().default(null),
+}).strict();
+export const approvalResponseSchema = z.object({
+  decision: z.enum(['approve', 'feedback']), comment: z.string().trim().max(16000).default(''),
+}).strict().refine(value => value.decision !== 'feedback' || value.comment.length > 0,
+  { message: '추가 의견을 입력하세요.', path: ['comment'] });
+export const consultationSchema = z.object({ leaderId: reference, projectId: reference.nullable().optional(), prompt: z.string().trim().min(1).max(16000), requestId: reference.nullable().optional() });
 export const ceoSettingsSchema = z.object({
   provider: z.enum(['codex', 'claude']), model: z.string().trim().max(100),
   codexAccount: codexAccountSchema,
@@ -53,7 +63,8 @@ export const ceoChatSchema = z.object({
   prompt: z.string().trim().min(1).max(16000),
 }).strict();
 export const planSchema = z.object({
-  summary: z.string().min(1).max(8000), agreement: z.string().min(1).max(24000), specification: z.string().min(1).max(24000),
+  summary: z.string().min(1).max(8000), agreement: z.string().max(24000), specification: z.string().max(24000),
+  work: workRequestSchema.omit({ projectId: true }).nullable().default(null),
   tasks: z.array(z.object({
     title: text, description: z.string().max(6000), acceptance: z.string().max(3000),
     assigneeId: reference.nullable(), dependsOn: z.array(z.number().int().min(0)).max(20),
@@ -61,9 +72,13 @@ export const planSchema = z.object({
 });
 export const planJsonSchema = {
   type: 'object', additionalProperties: false,
-  required: ['summary', 'agreement', 'specification', 'tasks'],
+  required: ['summary', 'agreement', 'specification', 'tasks', 'work'],
   properties: {
     summary: { type: 'string' }, agreement: { type: 'string' }, specification: { type: 'string' },
+    work: { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false,
+      required: ['title', 'instruction', 'requestId'], properties: {
+        title: { type: 'string' }, instruction: { type: 'string' }, requestId: { type: ['string', 'null'] },
+      } }] },
     tasks: { type: 'array', items: { type: 'object', additionalProperties: false,
       required: ['title', 'description', 'acceptance', 'assigneeId', 'dependsOn'],
       properties: {
@@ -73,5 +88,27 @@ export const planJsonSchema = {
     } },
   },
 };
+
+// Reports are immutable versions; final prose is rendered from these fields.
+export const workResultSchema = z.object({
+  summary: z.string().trim().min(1).max(4000),
+  workPerformed: z.array(z.string().min(1).max(2000)).max(40),
+  artifacts: z.array(z.object({ path: z.string().min(1).max(2000), description: z.string().max(1000) }).strict()).max(40),
+  verification: z.array(z.object({ criterion: z.string().min(1).max(1000),
+    status: z.enum(['passed', 'failed', 'not_run']), evidence: z.string().max(3000) }).strict()).max(40),
+  remaining: z.array(z.string().min(1).max(2000)).max(20),
+  followUp: z.array(z.string().min(1).max(2000)).max(20),
+}).strict();
+export const taskReviewSchema = z.object({
+  decision: z.enum(['accepted', 'rework', 'blocked']),
+  rationale: z.string().trim().min(1).max(6000),
+  checks: z.array(z.object({ criterion: z.string().min(1).max(1000),
+    status: z.enum(['passed', 'failed', 'not_verified']), evidence: z.string().trim().min(1).max(3000) }).strict()).max(40),
+  reworkInstructions: z.string().max(6000),
+  knowledge: z.array(z.string().min(1).max(2000)).max(10),
+}).strict();
+export const outputSchemaFor = kind => kind === 'plan' ? planJsonSchema
+  : kind === 'work' ? z.toJSONSchema(workResultSchema)
+    : kind === 'task_review' ? z.toJSONSchema(taskReviewSchema) : null;
 
 export const fail = (message, statusCode = 409) => { throw Object.assign(new Error(message), { statusCode }); };

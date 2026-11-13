@@ -1,0 +1,26 @@
+.request-flow-toolbar { margin-bottom: 20px; }
+.request-flow-list { display: grid; gap: 16px; }
+.request-flow-card { padding: 20px; }
+.request-flow-card > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.request-flow-card h2 { margin: 6px 0 8px; font-size: 1.2rem; }
+.request-flow-card > header p { margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.request-flow-kicker { color: var(--muted); font-size: .8rem; }
+.request-stages { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 8px; margin-top: 20px; overflow-x: auto; }
+.request-stage { display: flex; gap: 8px; min-width: 130px; padding: 12px; border: 1px solid var(--line); }
+.request-stage-marker { flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--muted); }
+.request-stage.done .request-stage-marker { background: #54bf83; }
+.request-stage.current .request-stage-marker { background: #f0b44b; }
+.request-stage.gap .request-stage-marker { background: var(--danger, #c7785b); }
+.request-stage strong, .request-stage small { display: block; }
+.request-stage strong { font-size: .85rem; }
+.request-stage small { margin-top: 6px; color: var(--muted); line-height: 1.4; }
+.request-flow-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 20px; padding-top: 18px; margin-top: 18px; border-top: 1px solid var(--line); }
+.request-flow-details h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: .88rem; }
+.request-flow-details .text-button { display: flex; align-items: center; gap: 4px; margin: 6px 0; text-align: left; }
+.request-task-link { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 7px 0; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; }
+.request-task-link small { display: block; color: var(--muted); margin-top: 3px; }
+.request-flow-note { color: var(--muted); font-size: .8rem; }
+@media (max-width: 900px) { .request-stages { grid-template-columns: repeat(6, 150px); } }
+
+.request-final-report { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.request-final-report h3 { margin-top: 0; font-size: 1rem; }

@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DATA } from './store.js';
 import { fail } from './contracts.js';
+import { agentAccessInstructions, DEFAULT_INSTRUCTIONS, LEGACY_DEFAULT_INSTRUCTIONS, PREVIOUS_DEFAULT_INSTRUCTIONS, PREVIOUS_WORK_INSTRUCTIONS, PREVIOUS_REGISTRATION_INSTRUCTIONS } from './agent-access.js';
 
 export const GUIDANCE_CONFIG = { project_root_markers: ['.tars-root'], project_doc_max_bytes: 32 * 1024 };
 export const memberDirectory = member => member.role === 'ceo'
@@ -12,7 +13,25 @@ export const appliesTo = (doc, member, projectId) => (!doc.departmentId || doc.d
   && (!doc.projectId || doc.projectId === projectId);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sharedSkills = join(DATA, 'shared', 'skills');
-const commonRules = '자동 적용된 지침은 변경 확인이 필요한 경우에만 다시 읽으세요. 참고 지침은 명시된 적용 조건이 현재 작업에 맞을 때 해당 원문만 읽으세요. 관련 스킬의 SKILL.md와 필요한 참고 자료만 읽으세요. 자체 하위 에이전트 생성, 재귀 호출, 자동 재시도는 하지 마세요. 추가 작업은 보고에 제안하세요. 내부 추론 대신 진행 단계와 차단 사항을 짧게 알리세요. 작업 종료 보고에는 받은 지시, 수행한 task, 결과·산출물, 검증·미검증, 미완료·차단 사유를 구분하세요. TARS가 이력을 저장하므로 별도 이력 파일을 직접 수정하지 마세요. 실행 종료와 검토 완료는 다릅니다. 관리자는 배정·보고 제안 전에 제공된 조직 상태 파일의 확인 시각과 담당자 실행 여부를 확인하세요.';
+const commonRules = '자동 적용된 지침은 변경 확인이 필요한 경우에만 다시 읽으세요. 참고 지침은 명시된 적용 조건이 현재 작업에 맞을 때 해당 원문만 읽으세요. 관련 스킬의 SKILL.md와 필요한 참고 자료만 읽으세요. 내부 추론 대신 진행 단계와 차단 사항을 짧게 알리세요. 작업 종료 보고에는 받은 지시, 수행한 task, 결과·산출물, 검증·미검증, 미완료·차단 사유를 구분하세요. TARS가 이력을 저장하므로 별도 이력 파일을 직접 수정하지 마세요. 실행 종료와 검토 완료는 다릅니다. 관리자는 배정·보고 전에 제공된 조직 상태 파일의 확인 시각과 담당자 실행 여부를 확인하세요.';
+
+export function reviseDocument(store, existing, input) {
+  const revisions = [...existing.revisions, { version: existing.version, content: existing.content, title: existing.title,
+    instructionMode: existing.instructionMode || 'always', readWhen: existing.readWhen || '', savedAt: existing.updatedAt }];
+  return store.patch('documents', existing.id, { ...input, version: existing.version + 1, revisions });
+}
+export function initializeDefaultInstructions(store) {
+  const documents = store.list('documents');
+  if (!documents.some(doc => doc.kind === 'instruction')) {
+    store.put('documents', { title: '팀 공통 작업 원칙', kind: 'instruction', instructionMode: 'always', version: 1,
+      revisions: [], projectId: null, departmentId: null, content: DEFAULT_INSTRUCTIONS });
+  }
+  // Upgrade only the untouched, TARS-generated default. Keep custom rules and history.
+  for (const doc of documents) if (doc.kind === 'instruction' && doc.title === '팀 공통 작업 원칙'
+    && !doc.departmentId && !doc.projectId && [LEGACY_DEFAULT_INSTRUCTIONS, PREVIOUS_DEFAULT_INSTRUCTIONS, PREVIOUS_WORK_INSTRUCTIONS, PREVIOUS_REGISTRATION_INSTRUCTIONS].includes(doc.content)) {
+    reviseDocument(store, doc, { content: DEFAULT_INSTRUCTIONS });
+  }
+}
 // Missing mode means legacy always-on guidance; never silently demote existing rules.
 export const instructionMode = doc => doc.instructionMode || 'always';
 const contentKey = content => content.replace(/\r\n/g, '\n').trim();
@@ -62,6 +81,25 @@ async function linkFile(target, path) {
   await symlink(relative(dirname(path), target), path);
 }
 
+async function removeDeletedDepartmentGuidance(store) {
+  const root = join(DATA, 'departments');
+  const rootInfo = await stat(root);
+  if (!rootInfo) return;
+  if (!rootInfo.isDirectory()) fail(`부서 지침 경로가 디렉토리가 아닙니다: ${root}`);
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/i.test(entry.name) || store.get('departments', entry.name)) continue;
+    const dir = join(root, entry.name);
+    const instructions = join(dir, 'instructions.md');
+    const agents = join(dir, 'AGENTS.md');
+    const agentInfo = await stat(agents);
+    if (agentInfo && (!agentInfo.isSymbolicLink() || resolve(dir, await readlink(agents)) !== instructions)) continue;
+    if (agentInfo) await rm(agents);
+    const instructionsInfo = await stat(instructions);
+    if (instructionsInfo?.isFile()) await rm(instructions);
+    try { await rmdir(dir); } catch (error) { if (!['ENOTEMPTY', 'EEXIST', 'ENOENT'].includes(error.code)) throw error; }
+  }
+}
+
 let sharedWrites = Promise.resolve();
 export function syncShared(store) {
   const pending = sharedWrites.then(() => writeShared(store));
@@ -75,7 +113,7 @@ async function writeShared(store) {
   for (const doc of documents) await renderFile(join(DATA, 'documents', `${doc.id}.md`), doc.content);
   const instructions = documents.filter(doc => doc.kind === 'instruction');
   const common = commonInstructions(instructions);
-  await renderFile(join(DATA, 'shared', 'instructions.md'), `# TARS 공용 지침\n\n${commonRules}\n\n${renderInstructions(common)}\n`);
+  await renderFile(join(DATA, 'shared', 'instructions.md'), `# TARS 공용 지침\n\n${commonRules}\n\n${agentAccessInstructions}\n\n${renderInstructions(common)}\n`);
   await renderFile(join(DATA, '.tars-root'), 'TARS instruction discovery root\n');
   await linkFile(join(DATA, 'shared', 'instructions.md'), join(DATA, 'AGENTS.md'));
   for (const department of store.list('departments')) {
@@ -83,6 +121,7 @@ async function writeShared(store) {
     await renderFile(join(dir, 'instructions.md'), `# ${department.name} 공용 지침\n\n${renderInstructions(departmentInstructions(instructions, department.id))}\n`);
     await linkFile(join(dir, 'instructions.md'), join(dir, 'AGENTS.md'));
   }
+  await removeDeletedDepartmentGuidance(store);
   for (const skill of documents.filter(doc => doc.kind === 'skill')) {
     const content = skill.content.startsWith('---\n') || skill.content.startsWith('---\r\n') ? skill.content
       : `---\nname: skill-${skill.id}\ndescription: ${JSON.stringify(skill.title)}\n---\n\n${skill.content}`;
@@ -94,9 +133,9 @@ async function writeShared(store) {
 export async function syncMember(store, member) {
   const dir = memberDirectory(member);
   const role = member.role === 'ceo'
-    ? 'CEO TARS: 모든 부서 위에서 프로젝트 진행, 차단 사항, 부서 간 조율과 우선순위를 관리합니다. 상태 기록과 부서 보고를 근거로 사용자에게 총괄 보고합니다. 직접 소스코드를 수정하거나 팀원을 실행하지 않습니다.'
+    ? 'CEO TARS: 사용자와 대화로 업무를 받고 상위 요청을 관리합니다. 요구사항과 설계, 검토, 팀장·팀원 위임, 실행과 결과 확인을 조율하고 사용자에게 보고합니다. 요청에 필요한 조직 구성과 구현·검증도 수행합니다.'
     : member.role === 'leader'
-      ? '팀장: 요구사항 협의, 설계, 작업 분배, 결과 검토와 보고에 집중합니다. 직접 소스코드를 수정하지 않습니다.'
+      ? '팀장: 사용자와 대화로 받은 업무를 요구사항·설계 문서와 하위 작업으로 기록합니다. 설계 검토와 작업 위임, 구현, 실행, 결과 확인과 보고를 수행합니다. 사용자 요청에 필요한 도구를 직접 사용합니다.'
       : '팀원: 배정된 범위에서 작업하고 결과, 변경 파일, 차단 사항과 검증 여부를 보고합니다.';
   const department = member.role === 'ceo' ? '전체 조직 · 모든 부서 상위' : store.require('departments', member.departmentId).name;
   await renderFile(join(dir, 'profile.md'), `# ${member.name}\n\n소속: ${department}\n역할: ${member.role}\n도구: ${member.provider}\n${member.provider === 'codex' ? `실행 계정: ${member.codexAccount || 'codex'}\n` : ''}모델: ${member.model || 'CLI 기본값'}\n전문 분야: ${member.specialty}\n`);

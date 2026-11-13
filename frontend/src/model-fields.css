@@ -29,6 +29,8 @@
 .model-picker-trigger[aria-expanded='true'] > svg { transform: rotate(90deg); }
 .model-power-reset { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); }
 .model-power-reset:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+.model-effort-auto { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; min-height: 36px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.model-effort-auto .text-button { font-size: 11px; }
 .model-fields :is(button, input, select):focus:not(:focus-visible) { outline: none; }
 .model-fields :is(button, input, select):focus-visible { outline: 2px solid var(--picker-accent); outline-offset: 3px; }
 .model-fields .model-picker :is(button, input):focus-visible { outline-color: var(--picker-accent); }

@@ -134,7 +134,7 @@ export async function integrate(store, task) {
   return { patchPath: target };
 }
 
-export async function contextFor(store, member, projectId, documentIds = [], { includeSummary = true } = {}) {
+export async function contextFor(store, member, projectId, documentIds = [], { includeSummary = false } = {}) {
   const native = member.provider === 'codex';
   const dir = memberDirectory(member);
   if (!native) { await syncShared(store); await syncMember(store, member); }
@@ -159,13 +159,16 @@ export async function contextFor(store, member, projectId, documentIds = [], { i
     documentBudget -= excerpt.length;
     return `관련 문서 ${doc.title} (v${doc.version}), 원문: ${join(DATA, 'documents', `${doc.id}.md`)}\n${excerpt}${excerpt.length < doc.content.length ? '\n[일부 발췌. 필요한 경우 원문을 읽으세요.]' : ''}`;
   });
+  const handoffs = store.list('documents').filter(doc => doc.sourceReviewId && doc.projectId === projectId
+    && (member.role === 'ceo' || doc.departmentId === member.departmentId)
+    && store.get('tasks', doc.sourceTaskId)?.acceptedReportId === doc.sourceReportId).slice(0, 8);
   return [
     native ? '' : `당신은 Tars 팀의 ${member.name}입니다. 역할: ${member.role}. 전문 분야: ${member.specialty}.`,
     native ? '' : `공통 지침 원문: ${join(DATA, 'shared', 'instructions.md')}\n${common}`,
     native ? '' : `개인 지침 원문: ${join(dir, 'instructions.md')}\n${personal}`,
     scopedInstructions,
     ...selectedInstructions,
-    includeSummary ? `이전 작업 인계 요약:\n${(member.summary || '없음').slice(-2000)}` : '',
+    handoffs.length ? `같은 프로젝트의 검토된 지식 (필요한 것만 읽기):\n${handoffs.map(doc => `${doc.title} · 원본 작업 ${doc.sourceTaskId} · ${join(DATA, 'documents', `${doc.id}.md`)}`).join('\n')}` : '',
     project ? `프로젝트: ${project.name}\n설명: ${member.role === 'ceo' ? project.description.slice(0, 1000) : project.description}\n참고 원본: ${project.path}` : '',
     ...excerpts,
     native ? '' : `사용 가능한 공통 스킬 (관련된 것만 읽기):\n${(skills.join('\n') || '없음').slice(0, 3000)}\n전체 목록: ${join(DATA, 'shared', 'skills')}`,
