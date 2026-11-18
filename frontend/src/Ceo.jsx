@@ -15,7 +15,7 @@ export function CeoCard({ office = false }) {
   return <section className="ceo-card" aria-label="전체 부서의 상위 CEO TARS">
     <div className="ceo-identity"><span className="ceo-emblem"><Command size={28} /></span><div><p className="ceo-kicker">CHIEF EXECUTIVE AI</p><div className="ceo-name"><h2>TARS</h2><Badge status={ceo.status} /></div><p className="ceo-description">전체 프로젝트의 진행과 부서 간 업무를 총괄합니다.</p><span className="ceo-model">{providerLabel(ceo)} · {ceo.model || 'CLI 기본 모델'} · {ceo.reasoning === 'default' ? '기본' : ceo.reasoning} 추론</span></div></div>
     <div className="ceo-scope"><div><small>관할 부서</small><strong>{number(data.departments.length)}</strong></div><div><small>프로젝트</small><strong>{number(data.projects.length)}</strong></div></div>
-    <div className="ceo-actions">{!office && <Link to="/ceo" className="button primary">TARS 상황실<ArrowUpRight size={15} /></Link>}{ceo.currentSessionId && <button className="button secondary" onClick={() => open('sessionDetail', { id: ceo.currentSessionId })}>현재 세션<ArrowUpRight size={14} /></button>}<button className="button secondary" disabled={ceo.status === 'running'} onClick={() => open('ceoSettings')}><Settings2 size={14} />TARS 설정</button></div>
+    <div className="ceo-actions">{!office && <Link to="/ceo" className="button primary">TARS 상황실<ArrowUpRight size={15} /></Link>}{ceo.currentSessionId && <button className="button secondary" onClick={() => open('sessionDetail', { id: ceo.currentSessionId })}>현재 실행<ArrowUpRight size={14} /></button>}<button className="button secondary" disabled={ceo.status === 'running'} onClick={() => open('ceoSettings')}><Settings2 size={14} />TARS 설정</button></div>
   </section>;
 }
 
@@ -31,6 +31,7 @@ export function CeoSettings() {
   async function save(event) {
     event.preventDefault();
     const values = Object.fromEntries(new FormData(event.currentTarget));
+    if (values.sessionProfiles) values.sessionProfiles = JSON.parse(values.sessionProfiles);
     try { await perform('/ceo', 'PATCH', values, 'TARS 설정을 저장했습니다.'); close(); }
     catch (issue) { setError(issue.message); }
   }

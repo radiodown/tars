@@ -23,11 +23,12 @@ test('API and execution reject incompatible Claude settings while preserving Cod
   await writeFile(binary, `#!${process.execPath}
 import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-const args=process.argv.slice(2);
+const args=process.argv.slice(2).flatMap(arg => arg.startsWith('--') && arg.includes('=') ? [arg.slice(0,arg.indexOf('=')), arg.slice(arg.indexOf('=')+1)] : [arg]);
 appendFileSync(${JSON.stringify(trace)},JSON.stringify(args)+'\\n');
 if(args.includes('--input-format')) {
   createInterface({input:process.stdin}).on('line',line=>{
     const request=JSON.parse(line);
+    if (request.type === 'user') { console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'fake CLI completed', session_id: 'fake-session' })); return; }
     if(request.type!=='control_request'||request.request.subtype!=='initialize')process.exit(3);
     console.log(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:request.request_id,response:{models:${JSON.stringify(models)}}}}));
   });
@@ -97,7 +98,7 @@ if(args.includes('--input-format')) {
     for (const stream of [runner.stdout, runner.stderr]) stream.on('data', chunk => { output += chunk; });
     assert.equal((await once(runner, 'exit'))[0], 0, output);
     const calls = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse);
-    const runs = calls.filter(args => !args.includes('--input-format'));
+    const runs = calls.filter(args => args.includes('--permission-mode'));
     assert.equal(runs.length, 2, 'invalid profiles must not launch inference');
     assert.equal(runs[0][runs[0].indexOf('--effort') + 1], 'max');
     assert(!runs[1].includes('--effort'), 'default delegates to CLI settings');

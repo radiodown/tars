@@ -1,6 +1,8 @@
+import { ChangeReview } from './ChangeReview';
+import { useRecord } from './record-details';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowRight, Check, Code, Download, FileText, GitMerge, Pencil, Play, Square, Trash2, User } from 'lucide-react';
+import { ArrowRight, Download, FileText, Pencil, Play, Square, Trash2, User } from 'lucide-react';
 import { useWorkspace } from './App';
 import { api, isLive, kindLabels, labels, providerLabel, time } from './api';
 import { Avatar, Badge, Dialog, Empty, Field, Markdown, Submit } from './ui';
@@ -8,6 +10,7 @@ import { ModelFields } from './ModelFields';
 import { SessionTerminal } from './SessionTerminal';
 import { ExecutionRecord, HistoryTimeline, TaskExecutionHistory } from './WorkHistory';
 import { TaskResultVersions } from './TaskWorkflow';
+import { isWorkRequest } from '../../shared/work-requests.mjs';
 
 const templates = {
   agreement: '# 협의 문서\n\n## 목적과 배경\n\n## 요구사항과 범위\n\n## 합의된 결정\n\n## 제약 및 제외 범위\n\n## 미결 사항\n\n## 완료 기준\n',
@@ -23,6 +26,11 @@ export function EntityForm({ type, initial }) {
   const [department, setDepartment] = useState(initial.departmentId || data.departments[0]?.id || '');
   const [role, setRole] = useState(initial.role || 'member');
   const [project, setProject] = useState(initial.projectId || '');
+  const [requestId, setRequestId] = useState(initial.requestId || '');
+  const [goalId, setGoalId] = useState(initial.goalId || '');
+  const work = data.requests.find(request => request.id === requestId);
+  const goal = work?.progressPlan?.goals.find(goal => goal.id === goalId);
+  const availableUnits = goal ? goal.target - data.tasks.filter(task => task.requestId === requestId && task.goalId === goalId && task.id !== initial.id && task.status !== 'cancelled').reduce((sum, task) => sum + (task.plannedUnits || 0), 0) : 0;
   const [kind, setKind] = useState(initial.kind || 'note');
   const [instructionMode, setInstructionMode] = useState(initial.instructionMode || (editing ? 'always' : 'on_demand'));
   const [content, setContent] = useState(initial.content ?? templates[initial.kind || 'note']);
@@ -41,9 +49,11 @@ export function EntityForm({ type, initial }) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const values = Object.fromEntries(form);
+    if (values.sessionProfiles) values.sessionProfiles = JSON.parse(values.sessionProfiles);
     if (type === 'department') values.projectId = values.projectId || null;
     if (type === 'document') Object.assign(values, { kind, content, instructionMode, readWhen: values.readWhen || '', projectId: values.projectId || null, departmentId: values.departmentId || null, ...(editing ? { version: initial.version } : {}) });
     if (type === 'task') Object.assign(values, { projectId: project || null, departmentId: department, assigneeId: values.assigneeId || null,
+      requestId: requestId || null, ...(work?.progressPlan ? { goalId, plannedUnits: Number(values.plannedUnits) } : {}),
       dependsOn: form.getAll('dependsOn'), documentIds: form.getAll('documentIds'), isolation: project ? values.isolation : 'personal' });
     if (type === 'member') values.departmentId = department;
     try { await perform(`/${collection}${editing ? `/${initial.id}` : ''}`, editing ? 'PATCH' : 'POST', values); close(); }
@@ -69,8 +79,15 @@ export function EntityForm({ type, initial }) {
         </>}
         {type === 'project' && <Field label="소스코드 디렉토리" hint="이 서버에 있는 절대 경로를 입력하세요. 작업 시 별도 디렉토리를 만듭니다."><input name="path" required defaultValue={initial.path || ''} placeholder="/home/hjjin/my-project" /></Field>}
         {type === 'task' && <>
+          <Field label="소속 업무" hint="팀장 또는 TARS가 등록한 업무에 작업을 연결합니다."><select required disabled={editing} value={requestId} onChange={event => {
+            const selected = data.requests.find(request => request.id === event.target.value);
+            setRequestId(event.target.value); setGoalId(''); setProject(selected?.projectId || '');
+            if (selected?.departmentId) setDepartment(selected.departmentId);
+          }}><option value="">업무 선택</option>{data.requests.filter(request => isWorkRequest(request, data.tasks) && (request.status !== 'accepted' || request.id === requestId)).map(request => <option key={request.id} value={request.id}>{request.title}</option>)}</select></Field>
+          {work?.progressPlan && <div className="form-grid"><Field label="달성 목표"><select required value={goalId} onChange={event => setGoalId(event.target.value)}><option value="">목표 선택</option>{work.progressPlan.goals.map(goal => <option key={goal.id} value={goal.id}>{goal.title} · 목표 {goal.target}{goal.unit}</option>)}</select></Field>
+            <Field label="배정 수량" hint={goal ? `배정 가능 ${availableUnits}${goal.unit} · ${goal.acceptance}` : '목표를 선택하세요.'}><input key={goalId} type="number" name="plannedUnits" required min="1" max={availableUnits} step="1" disabled={!goal} defaultValue={goalId === initial.goalId ? initial.plannedUnits : 1} /></Field></div>}
           <div className="form-grid"><Field label="담당 팀원"><select name="assigneeId" defaultValue={initial.assigneeId || ''} key={department}><option value="">나중에 배정</option>{data.members.filter(m => m.departmentId === department && m.role === 'member').map(m => <option value={m.id} key={m.id}>{m.name} · {providerLabel(m)}</option>)}</select></Field><Field label="우선순위"><select name="priority" defaultValue={initial.priority || 'normal'}><option value="low">낮음</option><option value="normal">보통</option><option value="high">높음</option></select></Field></div>
-          <div className="form-grid"><Field label="프로젝트"><select value={project} onChange={event => setProject(event.target.value)}><option value="">프로젝트 없이 작업</option>{data.projects.map(p => <option value={p.id} key={p.id}>{p.name}</option>)}</select></Field>{project && <Field label="소스 분리 방식"><select name="isolation" defaultValue={initial.isolation === 'copy' ? 'copy' : 'worktree'}><option value="worktree">Git worktree</option><option value="copy">디렉토리 복사</option></select></Field>}</div>
+          <div className="form-grid"><Field label="프로젝트"><select value={project} disabled={Boolean(requestId)} onChange={event => setProject(event.target.value)}><option value="">프로젝트 없이 작업</option>{data.projects.map(p => <option value={p.id} key={p.id}>{p.name}</option>)}</select></Field>{project && <Field label="소스 분리 방식"><select name="isolation" defaultValue={initial.isolation === 'copy' ? 'copy' : 'worktree'}><option value="worktree">Git worktree</option><option value="copy">디렉토리 복사</option></select></Field>}</div>
           <Field label="완료 기준"><textarea required name="acceptance" rows={3} defaultValue={initial.acceptance || ''} placeholder="어떤 결과가 나오면 완료인가요?" /></Field>
           <Field label="선행 작업" hint="선택한 작업이 완료된 뒤 실행됩니다. Ctrl / ⌘로 여러 개를 선택할 수 있습니다."><select name="dependsOn" multiple defaultValue={initial.dependsOn || []} key={`${department}-${project}`}>{data.tasks.filter(t => t.id !== initial.id && t.departmentId === department && (t.projectId || '') === project).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></Field>
           <Field label="참고 문서"><select name="documentIds" multiple defaultValue={initial.documentIds || []}>{data.documents.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></Field>
@@ -98,17 +115,10 @@ export function EntityForm({ type, initial }) {
 
 export function TaskDetail({ taskId }) {
   const { data, close, open, fire, busy, notice } = useWorkspace();
-  const [showPatch, setShowPatch] = useState(false);
-  const [confirm, setConfirm] = useState(false);
   const task = data.tasks.find(t => t.id === taskId);
   const member = data.members.find(m => m.id === task?.assigneeId);
   const request = (data.requests || []).find(item => item.id === task?.requestId);
   const approvalNeeded = request?.approvalRequired && !request.executionAllowed;
-  const patch = useQuery({ queryKey: ['patch', taskId, task?.updatedAt], enabled: showPatch, queryFn: async () => {
-    const response = await fetch(`/api/tasks/${taskId}/patch`);
-    if (!response.ok) throw new Error((await response.json()).error);
-    return response.text();
-  } });
   if (!task) return null;
   return <Dialog title={task.title} subtitle={`TASK · ${task.id.slice(0, 8)}`} onClose={close} drawer>
     {notice?.error && <div className="error-box" role="alert">{notice.message}</div>}
@@ -120,31 +130,29 @@ export function TaskDetail({ taskId }) {
     </div>
     {approvalNeeded && <p className="muted">작업을 실행하려면 아래 업무 기록에서 최신 협의안을 승인해야 합니다.</p>}
     {task.error && <div className="error-box">{task.error}</div>}
+    {task.goalId && <section className="detail-section"><h3>달성 목표·배정 단위</h3><p>{request?.progressPlan?.goals.find(goal => goal.id === task.goalId)?.title || task.goalId} · 배정 {task.plannedUnits}{request?.progressPlan?.goals.find(goal => goal.id === task.goalId)?.unit || '단위'}</p><p>수행 보고 {task.status === 'done' && task.acceptedReportId ? task.plannedUnits : task.completedUnits || 0} / {task.plannedUnits} · {task.status === 'done' && task.acceptedReportId ? '검토 완료' : '검토 전'}</p></section>}
     <section className="detail-section"><h3>작업 설명</h3><Markdown>{task.description || '설명이 없습니다.'}</Markdown></section>
     <section className="detail-section"><h3>완료 기준</h3><Markdown>{task.acceptance || '등록된 완료 기준이 없습니다.'}</Markdown></section>
     {task.dependsOn.length > 0 && <section className="detail-section"><h3>선행 작업</h3>{task.dependsOn.map(key => { const dep = data.tasks.find(t => t.id === key); return <div className="dependency" key={key}><span>{dep?.title}</span><Badge status={dep?.status} /></div>; })}</section>}
     <section className="detail-section"><h3>작업 공간</h3><p className="mono path">{task.workspace || '첫 실행 시 작업 디렉토리를 만듭니다.'}</p><small className="muted">{task.isolation === 'worktree' ? 'Git worktree · 기준 커밋에서 작업' : task.isolation === 'copy' ? '디렉토리 복사 · 변경 사항은 수동 통합' : '개인 작업 디렉토리'}</small></section>
     <TaskResultVersions key={task.id} task={task} />
     <details><summary>실행 상세·상태 이력</summary><TaskExecutionHistory key={task.id} task={task} /></details>
-    {['review', 'done'].includes(task.status) && task.isolation === 'worktree' && <section className="detail-section"><h3>변경 사항 통합</h3><div className="action-row"><button className="button secondary" onClick={() => setShowPatch(!showPatch)}><Code size={15} />패치 {showPatch ? '접기' : '보기'}</button>{task.status === 'done' && !task.integratedAt && <button className="button secondary" onClick={() => { setShowPatch(true); setConfirm(true); }}><GitMerge size={15} />원본에 적용</button>}</div>
-      {showPatch && <pre className="patch-preview">{patch.isError ? patch.error.message : patch.isPending ? '변경 내용을 불러오는 중…' : patch.data || '변경 사항이 없습니다.'}</pre>}
-      {confirm && !task.integratedAt && <div className="confirm-box"><p>아래 원본 디렉토리에 변경 사항을 적용합니다. 커밋은 만들지 않습니다.</p><code>{data.projects.find(p => p.id === task.projectId)?.path}</code><button className="button primary" disabled={busy || patch.isPending || patch.isError || !patch.data} onClick={() => { fire(`/tasks/${task.id}/integrate`, 'POST', {}, '변경 사항을 원본에 적용했습니다.'); setConfirm(false); }}>변경 사항 적용</button></div>}
-      {task.integratedAt && <p className="success-text"><Check size={15} />{time(task.integratedAt)} 원본에 적용됨</p>}
-    </section>}
+    {['review', 'done', 'blocked'].includes(task.status) && task.isolation === 'worktree' && task.workspace && <ChangeReview task={task} />}
   </Dialog>;
 }
 
 export function SessionDetail({ sessionId }) {
   const { data, close, notice } = useWorkspace();
-  const session = data.sessions.find(s => s.id === sessionId);
+  const summary = data.sessions.find(s => s.id === sessionId);
+  const { record: session } = useRecord('sessions', summary);
   const member = data.members.find(m => m.id === session?.memberId);
   if (!session) return null;
-  return <Dialog title={`${member?.name || 'AI'}의 CLI 세션`} subtitle={`${providerLabel(session)} · ${session.model}`} onClose={close} drawer>
+  return <Dialog title={`${member?.name || 'AI'}의 실행 기록`} subtitle={`${providerLabel(session)} · ${session.model}`} onClose={close} drawer>
     {notice?.error && <div className="error-box" role="alert">{notice.message}</div>}
     <ExecutionRecord session={session} />
-    <SessionTerminal key={session.id} session={session} />
+    <SessionTerminal key={`terminal-${session.id}`} session={session} />
     {session.output && <section className="detail-section"><h3>응답</h3><Markdown>{session.output}</Markdown></section>}
     {session.providerSessionId && <p className="muted mono">Provider session: {session.providerSessionId}</p>}
-    <HistoryTimeline key={session.id} kind="sessions" id={session.id} revision={`${session.status}:${session.steering?.length || 0}`} live={isLive(session.status)} />
+    <HistoryTimeline key={`history-${session.id}`} kind="sessions" id={session.id} revision={`${session.status}:${session.steering?.length || 0}`} live={isLive(session.status)} />
   </Dialog>;
 }

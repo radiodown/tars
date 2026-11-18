@@ -61,7 +61,7 @@ function progressText(row, work, settings) {
     if (work.activeCount >= settings.maxConcurrent) return `동시 실행 한도 ${settings.maxConcurrent}개가 사용 중입니다. 실행 여유를 기다리고 있습니다.`;
     return '실행 순서를 기다리고 있습니다.';
   }
-  if (task.status === 'running') return '작업은 진행 중으로 기록되어 있으나 실행 중인 세션이 없습니다. 실행 기록을 확인하세요.';
+  if (task.status === 'running') return '작업은 진행 중으로 기록되어 있으나 진행 중인 실행이 없습니다. 실행 기록을 확인하세요.';
   if (task.status === 'review') return '실행 결과가 도착했습니다. 검토를 기다리고 있습니다.';
   if (task.status === 'done') return task.integratedAt ? '검토를 마치고 변경 사항을 원본에 적용했습니다.' : '작업이 완료 처리되었습니다.';
   if (task.status === 'cancelled') return '작업이 취소되었습니다.';
@@ -87,7 +87,7 @@ function WorkRow({ row, work, settings, now, open }) {
   return <tr className={`${live ? 'is-live' : ''} ${problem(row.status) ? 'needs-attention' : ''}`}>
     <td className="monitor-work-cell">
       <button type="button" className="monitor-work-title" onClick={() => open(task ? 'taskDetail' : 'sessionDetail', task || session)}>{row.title}</button>
-      <span className="monitor-work-meta">{projectLabel} · {task ? `TSK-${task.id.slice(0, 4).toUpperCase()}` : sessionKinds[session.kind] || '실행 세션'}</span>
+      <span className="monitor-work-meta">{projectLabel} · {task ? `TSK-${task.id.slice(0, 4).toUpperCase()}` : sessionKinds[session.kind] || '실행'}</span>
       {!task && session.prompt && <p className="monitor-request" title={session.prompt}>{session.prompt}</p>}
     </td>
     <td className="monitor-owner-cell"><div className="monitor-owner"><Avatar member={member} /><span><strong>{member?.name || '미배정'}</strong><small>{member ? roleLabel(member) : '담당자 필요'}</small></span></div></td>

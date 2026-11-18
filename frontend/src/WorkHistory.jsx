@@ -7,7 +7,7 @@ import { Badge, Markdown } from './ui';
 import { WorkApprovals } from './WorkApprovals';
 import './work-history.css';
 
-const eventNames = { status: '상태', progress: '진행 단계', note: 'AI 진행 보고', instruction: '추가 지시', assignment: '담당자', edited: '작업 수정', integrated: '통합', submitted: '결과 제출', reviewed: '결과 검토', approval_requested: '사용자 확인 요청', user_response: '사용자 승인·의견' };
+const eventNames = { status: '상태', progress: '진행 단계', note: 'AI 진행 보고', instruction: '추가 지시', assignment: '담당자', edited: '작업 수정', deleted: '삭제', integrated: '통합', submitted: '결과 제출', reviewed: '결과 검토', approval_requested: '사용자 확인 요청', user_response: '사용자 승인·의견' };
 const entityNames = { sessions: '실행', tasks: 'TASK', members: 'AI' };
 const timestamp = value => value ? new Intl.DateTimeFormat('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '기록 없음';
 

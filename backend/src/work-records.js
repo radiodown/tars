@@ -4,6 +4,7 @@ import { DATA, id, now } from './store.js';
 import { memberDirectory } from './guidance.js';
 import { digest, taskRecordPath } from './task-artifacts.js';
 import { isWorkRequest, sessionBelongsToRequest } from '../../shared/work-requests.mjs';
+import { progressSummary } from '../../shared/work-progress.mjs';
 
 const live = session => session && ['preparing', 'running', 'stopping'].includes(session.status);
 const clip = (value, length = 600) => String(value || '').slice(0, length);
@@ -27,6 +28,7 @@ export function requestSnapshot(store, member, kind, details) {
       : { id: details.initiatedBy || 'user', name: store.get('members', details.initiatedBy || 'user')?.name || '사용자' },
     kind, instruction: details.prompt || task?.description || '',
     task: task ? { id: task.id, title: task.title, description: task.description, acceptance: task.acceptance,
+      ...(task.goalId ? { goalId: task.goalId, plannedUnits: task.plannedUnits } : {}),
       projectId: task.projectId, departmentId: task.departmentId, assigneeId: task.assigneeId, dependsOn: task.dependsOn, isolation: task.isolation } : null,
     source: source ? { sessionId: source.id, memberId: source.memberId, relation: task.originSessionId ? 'created_from' : 'reference_document', instruction: source.prompt || source.request?.instruction || '' } : null,
     documents: (task?.documentIds || []).map(key => store.get('documents', key)).filter(Boolean)
@@ -51,7 +53,9 @@ export function managementSnapshot(store, manager, projectId = null) {
     requests: requests.map(request => ({ id: request.id, title: request.title, instruction: clip(request.instruction),
       status: request.status, projectId: request.projectId, createdBy: request.createdBy, reportDocumentId: request.reportDocumentId || null,
       pendingApprovalId: request.pendingApprovalId || null, approvedPlanId: request.approvedPlanId || null,
-      followupJobId: request.followupJobId || null })),
+      followupJobId: request.followupJobId || null,
+      ...(request.progressPlan ? { summary: request.progressPlan.summary, goal: request.progressPlan.goal,
+        achievement: progressSummary(request, allTasks) } : {}) })),
     // Availability is organization-wide even if the requested report covers one project.
     members: members.map(member => {
       const current = sessionById.get(member.currentSessionId);

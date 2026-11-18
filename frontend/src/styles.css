@@ -57,3 +57,9 @@ dialog{padding:0;border:1px solid #e3e8df;border-radius:13px;width:min(520px,cal
 .account-usage-page>.usage-note{font-size:11px;line-height:1.7;color:#84909e;margin-top:14px}
 @media(max-width:1200px){.account-quota-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:800px){.account-quota-grid{grid-template-columns:1fr;gap:12px}.account-quota-card{padding:14px}}
+
+.session-history-row { display:flex; width:100%; gap:16px; align-items:center; padding:16px; border-bottom:1px solid var(--border); text-align:left; min-height:44px; }
+.session-history-row > span:first-child { flex:1; min-width:0; overflow-wrap:anywhere; }
+.session-profiles input[type="checkbox"], .session-question input[type="checkbox"] { width:auto; }
+.session-question textarea, .terminal-handoff pre { max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; }
+@media (max-width:767px) { .session-history-row { flex-wrap:wrap; gap:8px; } .session-history-row small { width:100%; } }

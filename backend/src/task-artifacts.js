@@ -10,12 +10,16 @@ export const digest = value => createHash('sha256').update(typeof value === 'str
 export const taskRecordPath = taskId => join(DATA, 'tasks', taskId, 'record.md');
 export function completionCriteria(task) {
   const lines = String(task.acceptance || '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (task.goalId && task.plannedUnits) lines.unshift(`목표 ${task.goalId}: 배정된 ${task.plannedUnits}단위 전체의 산출물과 검증 근거 확인`);
   const criteria = lines.length > 40 ? [...lines.slice(0, 39), lines.slice(39).join('\n')] : lines;
   return criteria.map((text, index) => ({ id: `C${index + 1}`, text }));
 }
 export function specificationHash(store, task) {
+  const goal = task.goalId && store.get('requests', task.requestId)?.progressPlan?.goals.find(goal => goal.id === task.goalId);
   return digest({ title: task.title, description: task.description, acceptance: task.acceptance,
     assigneeId: task.assigneeId, projectId: task.projectId, departmentId: task.departmentId,
+    ...(task.goalId ? { goalId: task.goalId, plannedUnits: task.plannedUnits,
+      goal: goal ? { unit: goal.unit, acceptance: goal.acceptance } : null } : {}),
     documents: (task.documentIds || []).map(key => [key, store.get('documents', key)?.version]),
     dependencies: (task.dependsOn || []).map(key => [key, store.get('tasks', key)?.acceptedReportId || null]) });
 }

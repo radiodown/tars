@@ -2,12 +2,18 @@
   "name": "tars",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["frontend", "backend"],
-  "engines": { "node": ">=22.13.0" },
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "test": "node --test backend/test/*.test.js frontend/test/*.test.js",
     "dev:frontend": "npm run dev --workspace frontend",
     "dev:backend": "npm run dev --workspace backend",
-    "build": "npm run build --workspace frontend"
+    "build": "npm run build --workspace frontend",
+    "check:ai": "node scripts/check-ai-compat.mjs"
   }
 }

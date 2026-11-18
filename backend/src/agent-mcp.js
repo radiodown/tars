@@ -5,11 +5,11 @@ import { agentTools, callAgentTool } from './agent-tools.js';
 // including its validation, document revisions, history and generated files.
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const send = message => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
-for await (const line of lines) {
+async function handle(line) {
   let request;
   try { request = JSON.parse(line); }
-  catch { send({ id: null, error: { code: -32700, message: 'Invalid JSON' } }); continue; }
-  if (request?.id == null) continue;
+  catch { send({ id: null, error: { code: -32700, message: 'Invalid JSON' } }); return; }
+  if (request?.id == null) return;
   try {
     let result;
     switch (request.method) {
@@ -24,8 +24,10 @@ for await (const line of lines) {
         break;
       default:
         send({ id: request.id, error: { code: -32601, message: `Unsupported method: ${request.method}` } });
-        continue;
+        return;
     }
     send({ id: request.id, result });
   } catch (error) { send({ id: request.id, error: { code: -32603, message: error.message } }); }
 }
+
+lines.on('line', line => { void handle(line); });

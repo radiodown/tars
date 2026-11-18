@@ -111,6 +111,7 @@ test('a fast Codex turn retains its last events before the progress throttle flu
   const listeners = new Map();
   servers.connection = async () => ({ listeners, rpc: { call: async (method, params) => {
     if (method === 'skills/list') return { data: [{ cwd: directory, skills: [] }] };
+    if (method === 'mcpServerStatus/list') return { data: [{ name: 'tars', tools: Object.fromEntries((await import('../src/agent-access.js')).TARS_TOOL_NAMES.map(name => [name, { name }])) }] };
     if (method === 'thread/start') return { thread: { id: 'thread' }, instructionSources: [] };
     if (method === 'turn/start') {
       assert.equal(params.summary, 'auto');

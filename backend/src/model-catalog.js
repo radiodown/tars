@@ -74,6 +74,7 @@ export async function modelCatalog(provider, account = 'codex') {
 }
 
 export async function validateModelSettings(member) {
+  for (const profile of Object.values(member.sessionProfiles || {})) await validateModelSettings({ ...member, ...profile, sessionProfiles: {} });
   if (member.provider !== 'claude') return;
   // Reject foreign effort names even if the CLI cannot be queried.
   let error = modelSettingsError(member);

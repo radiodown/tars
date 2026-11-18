@@ -17,7 +17,7 @@ function AiNode({ member, executive = false }) {
     <div className="org-identity"><Avatar member={member} large /><div><h3 title={member.name}>{member.name}</h3><p>{executive ? '모든 부서와 프로젝트를 관리합니다.' : member.specialty || '전문 분야 미설정'}</p></div></div>
     <dl className="org-model">{member.provider === 'codex' && <div><dt>계정</dt><dd className="org-account">{member.codexAccount || 'codex'}</dd></div>}<div><dt>모델</dt><dd><span>{member.provider === 'codex' ? 'Codex' : 'Claude'}</span><strong>{member.model || 'CLI 기본 모델'}</strong></dd></div><div><dt>추론</dt><dd>{!member.reasoning || member.reasoning === 'default' ? '기본 설정' : member.reasoning}</dd></div></dl>
     <footer>
-      <button type="button" disabled={running} title={running ? '진행 중인 세션을 중지한 뒤 설정을 변경하세요.' : undefined} onClick={() => open(executive ? 'ceoSettings' : 'member', executive ? {} : member)}><Settings2 size={13} />{executive ? 'TARS 설정' : '프로필 · 소속 설정'}</button>
+      <button type="button" disabled={running} title={running ? '진행 중인 실행을 중지한 뒤 설정을 변경하세요.' : undefined} onClick={() => open(executive ? 'ceoSettings' : 'member', executive ? {} : member)}><Settings2 size={13} />{executive ? 'TARS 설정' : '프로필 · 소속 설정'}</button>
       <Link to={executive ? '/ceo' : `/sessions?member=${member.id}`}>대화하기<ArrowUpRight size={13} /></Link>
     </footer>
   </article>;

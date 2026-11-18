@@ -1,7 +1,7 @@
 import { collections } from './store.js';
 import { fail } from './contracts.js';
 
-const names = { members: 'AI', tasks: '작업', documents: '문서', sessions: '실행 기록' };
+const names = { members: 'AI', tasks: '작업', documents: '문서', sessions: '실행 기록', conversations: '세션' };
 
 export function deleteDepartment(store, departmentId) {
   return store.transaction(() => {

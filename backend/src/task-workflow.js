@@ -1,12 +1,18 @@
 import { id, now } from './store.js';
 import { fail, workRequestSchema, workResultSchema, taskReviewSchema } from './contracts.js';
-import { isWorkRequest, sessionBelongsToRequest } from '../../shared/work-requests.mjs';
+import { isWorkRequest, sessionBelongsToRequest, sessionRelatesToWork } from '../../shared/work-requests.mjs';
 import { WorkApprovals } from './work-approvals.js';
+import { workProgress } from '../../shared/work-progress.mjs';
+import { validateProgressAllocation } from './work-progress.js';
 import { assertCurrentArtifacts, captureArtifacts, completionCriteria, digest, renderResult, specificationHash, taskRecordPath } from './task-artifacts.js';
 
-const live = session => ['preparing', 'running', 'stopping'].includes(session?.status);
+const live = session => ['preparing', 'running', 'waiting_input', 'stopping'].includes(session?.status);
 const terminal = task => ['done', 'cancelled'].includes(task.status);
 export const workflowKinds = ['task_review', 'request_report', 'request_escalation'];
+
+export function assertWorkNotDeleted(store, requestId) {
+  if (requestId && store.get('requests', requestId)?.deletedAt) fail('삭제된 업무입니다.', 404);
+}
 
 export class TaskWorkflow {
   constructor(store) { this.store = store; this.approvals = new WorkApprovals(store); }
@@ -20,7 +26,7 @@ export class TaskWorkflow {
     const member = this.store.get('members', identity.actor);
     const session = identity.session && this.store.require('sessions', identity.session.id);
     if (!member || !['leader', 'ceo'].includes(member.role) || !session
-      || session.memberId !== member.id || !['preparing', 'running'].includes(session.status)
+      || session.memberId !== member.id || !['preparing', 'running', 'waiting_input'].includes(session.status)
       || workflowKinds.includes(session.kind)) fail('업무는 대화 중인 팀장 또는 CEO AI가 등록합니다.', 403);
     if (input.projectId) this.store.require('projects', input.projectId);
     if (session.projectId && session.projectId !== input.projectId) fail('현재 대화와 같은 프로젝트의 업무를 등록하세요.', 400);
@@ -29,8 +35,9 @@ export class TaskWorkflow {
       if (input.requestId) {
         request = this.requireWork(input.requestId, input.projectId, member.id);
       } else {
+        if (!input.progressPlan || !input.acceptance.trim()) fail('새 업무에는 acceptance와 progressPlan(한 줄 요약·목표·측정 단위·수량·비중)이 필요합니다. 업무 목표·진행률·UI 작성 규칙을 확인하세요.', 400);
         request = this.request(input.instruction, input.projectId, member.id, {
-          title: input.title, registeredAt: now(), departmentId: member.departmentId, approvalRequired: true,
+          title: input.title, acceptance: input.acceptance, progressPlan: input.progressPlan, approvalMode: 'scope', allowManagerImplementation: false, registeredAt: now(), departmentId: member.departmentId, approvalRequired: true,
           sourceSessionId: session.id, conversationId: session.conversationId || null,
         });
       }
@@ -41,6 +48,7 @@ export class TaskWorkflow {
   requireWork(requestId, projectId, actor = 'user') {
     if (!requestId) fail('먼저 팀장 또는 CEO가 업무를 등록하고 requestId로 작업을 연결하세요.', 400);
     const request = this.store.require('requests', requestId);
+    assertWorkNotDeleted(this.store, requestId);
     const tasks = this.store.list('tasks');
     if (!isWorkRequest(request, tasks)) fail('대화 기록은 업무가 아닙니다. 업무를 먼저 등록하세요.', 400);
     if (request.projectId !== projectId) fail('같은 업무의 작업은 같은 프로젝트에 속해야 합니다.', 400);
@@ -55,7 +63,65 @@ export class TaskWorkflow {
     this.store.patch('sessions', session.id, { requestId,
       requestIds: [...new Set([...(session.requestIds || []), session.requestId, requestId].filter(Boolean))] });
   }
+  deleteRequest(requestId, activeSessions, operations) {
+    const { store } = this;
+    return store.transaction(() => {
+      const request = store.require('requests', requestId);
+      if (request.deletedAt) return { id: requestId, deletedAt: request.deletedAt };
+      const tasks = store.list('tasks');
+      if (!isWorkRequest(request, tasks)) fail('등록된 업무를 찾을 수 없습니다.', 404);
+      const work = tasks.filter(task => task.requestId === requestId);
+      const taskIds = new Set(work.map(task => task.id));
+      if (store.list('sessions').some(session => sessionRelatesToWork(session, request, taskIds)
+        && (live(session) || activeSessions.has(session.id)))) fail('연결된 실행이 끝나거나 중지된 뒤 삭제하세요.');
+      if (work.some(task => operations.has(task.id) || operations.has(task.projectId))) fail('작업 검토 또는 변경 반영이 끝난 뒤 삭제하세요.');
+      const unfinished = new Set(work.filter(task => task.status !== 'done').map(task => task.id));
+      if (tasks.some(task => !taskIds.has(task.id) && !terminal(task) && (task.dependsOn || []).some(id => unfinished.has(id)))) {
+        fail('다른 업무의 미완료 작업이 이 업무를 선행 작업으로 참조합니다. 연결을 정리한 뒤 삭제하세요.');
+      }
+      const message = '사용자가 업무를 삭제했습니다.';
+      for (const task of work.filter(task => !terminal(task))) {
+        store.patch('tasks', task.id, { status: 'cancelled', automationPaused: true, error: null, blocker: null }, { actor: 'user' });
+      }
+      for (const job of store.list('workflowJobs')) {
+        if ((job.requestId === requestId || taskIds.has(job.taskId)) && ['queued', 'running', 'blocked', 'cancelled'].includes(job.status)) {
+          store.patch('workflowJobs', job.id, { status: 'superseded', error: message });
+        }
+      }
+      for (const approval of store.list('workApprovals')) {
+        if (approval.requestId === requestId && approval.status === 'pending') store.patch('workApprovals', approval.id, { status: 'superseded' });
+      }
+      const deletedAt = now();
+      store.patch('requests', requestId, { deletedAt, paused: true, pendingApprovalId: null, followupJobId: null }, { actor: 'user' });
+      store.appendHistory({ kind: 'requests', entityId: requestId, actor: 'user', event: 'deleted', message });
+      return { id: requestId, deletedAt };
+    });
+  }
+  deleteTask(taskId, activeSessions, operations) {
+    const { store } = this;
+    return store.transaction(() => {
+      const task = store.require('tasks', taskId);
+      if (task.deletedAt) return { id: taskId, deletedAt: task.deletedAt };
+      if (task.status === 'running' || store.list('sessions').some(session => session.taskId === taskId
+        && (live(session) || activeSessions.has(session.id)))) fail('관련 실행이 끝나거나 중지된 뒤 삭제하세요.');
+      if (operations.has(taskId) || operations.has(task.projectId)) fail('작업 검토 또는 변경 반영이 끝난 뒤 삭제하세요.');
+      if (task.status !== 'done' && store.list('tasks').some(other => !terminal(other) && other.dependsOn?.includes(taskId))) {
+        fail('다른 미완료 작업이 이 작업을 선행 작업으로 참조합니다. 연결을 정리한 뒤 삭제하세요.');
+      }
+      const message = '사용자가 작업 기록을 삭제했습니다.';
+      for (const job of store.list('workflowJobs').filter(item => item.taskId === taskId
+        && ['queued', 'running', 'blocked', 'cancelled'].includes(item.status))) {
+        store.patch('workflowJobs', job.id, { status: 'superseded', error: message });
+      }
+      const deletedAt = now();
+      const cancelled = terminal(task) ? {} : { status: 'cancelled', automationPaused: true, error: null, blocker: null };
+      store.patch('tasks', taskId, { ...cancelled, deletedAt }, { actor: 'user' });
+      store.appendHistory({ kind: 'tasks', entityId: taskId, taskId, memberId: task.assigneeId, actor: 'user', event: 'deleted', message });
+      return { id: taskId, deletedAt };
+    });
+  }
   pauseRequest(requestId) {
+    assertWorkNotDeleted(this.store, requestId);
     return this.store.transaction(() => {
       for (const job of this.store.list('workflowJobs').filter(item => item.requestId === requestId && ['queued', 'running'].includes(item.status))) {
         this.store.patch('workflowJobs', job.id, { status: 'cancelled', error: '요청의 자동 진행이 중지되었습니다.' });
@@ -64,6 +130,7 @@ export class TaskWorkflow {
     });
   }
   resumeRequest(requestId) {
+    assertWorkNotDeleted(this.store, requestId);
     return this.store.transaction(() => {
       for (const job of this.store.list('workflowJobs').filter(item => item.requestId === requestId && item.status === 'cancelled' && !item.sessionId)) {
         const task = job.taskId ? this.store.get('tasks', job.taskId) : null;
@@ -76,8 +143,9 @@ export class TaskWorkflow {
   attachTask(input, actor = 'user', requestId = null, originSessionId = null) {
     return this.store.transaction(() => {
       const request = this.requireWork(requestId, input.projectId, actor);
+      validateProgressAllocation(this.store, request, input);
       this.linkSession(request.id, originSessionId);
-      this.store.patch('requests', request.id, { status: 'open', reportDocumentId: null });
+      this.store.patch('requests', request.id, { status: request.pendingApprovalId ? request.status : 'open', reportDocumentId: null });
       return this.store.put('tasks', { ...input, requestId: request.id, originSessionId,
         status: input.assigneeId ? 'assigned' : 'draft', createdBy: actor, reworkCount: 0,
         latestReportId: null, acceptedReportId: null, automationPaused: false }, { actor });
@@ -112,6 +180,7 @@ export class TaskWorkflow {
       this.cancelJobs(task.id, '새 실행으로 대체되었습니다.', 'superseded');
       if (task.requestId) this.store.patch('requests', task.requestId, { status: 'open', paused: false, reportDocumentId: null });
       return this.store.patch('tasks', task.id, { status: 'queued', error: null, acceptedReportId: null,
+        completedUnits: 0, blocker: null,
         automationPaused: false, ...(automatic ? {} : { reworkCount: 0 }) }, { actor });
     });
   }
@@ -184,6 +253,8 @@ export class TaskWorkflow {
       this.store.patch('tasks', taskId, { status: review.decision === 'accepted' ? 'done' : retry ? 'queued' : 'blocked',
         acceptedReportId: review.decision === 'accepted' ? reportId : null,
         completedAt: review.decision === 'accepted' ? now() : null,
+        ...(review.decision === 'accepted' ? { blocker: null } : {}),
+        ...(retry ? { completedUnits: 0, blocker: null } : {}),
         reviewId: saved.id, reworkInstructions: review.reworkInstructions,
         reworkCount: retry ? count + 1 : count,
         error: review.decision === 'accepted' || retry ? null
@@ -220,6 +291,11 @@ export class TaskWorkflow {
       integratedAt: task.integratedAt || null,
     })).sort((a, b) => a.id.localeCompare(b.id));
   }
+  requestSignature(requestId) {
+    const tasks = this.requestSnapshot(requestId);
+    const progressPlan = this.store.require('requests', requestId).progressPlan;
+    return digest(progressPlan ? { tasks, progressPlan } : tasks);
+  }
   reconcile() {
     for (const request of this.store.list('requests')) {
       if (request.pendingApprovalId || request.status === 'accepted' || this.approvals.pendingFollowup(request)
@@ -228,10 +304,11 @@ export class TaskWorkflow {
         || this.store.list('sessions').some(session => sessionBelongsToRequest(session, request.id) && ['plan', 'ceo_chat', 'member_chat'].includes(session.kind) && live(session))) continue;
       const tasks = this.requestSnapshot(request.id);
       if (!tasks.length) continue;
-      const completed = tasks.every(terminal);
-      const blocked = tasks.some(task => task.status === 'blocked');
+      const progress = workProgress(request, this.store.list('tasks'));
+      const completed = tasks.every(terminal) && (!progress.planned || progress.complete);
+      const blocked = tasks.some(task => task.status === 'blocked') || (tasks.every(terminal) && progress.planned && !progress.complete);
       if (!completed && !blocked) continue;
-      const signature = digest(tasks);
+      const signature = this.requestSignature(request.id);
       const kind = completed ? 'request_report' : 'request_escalation';
       this.job(kind, [request.id, signature], { requestId: request.id, signature, snapshot: tasks,
         memberId: this.reporter(request)?.id || null });
@@ -240,7 +317,7 @@ export class TaskWorkflow {
   finishRequest(jobId, session, content) {
     const job = this.store.require('workflowJobs', jobId);
     const request = this.store.require('requests', job.requestId);
-    if (job.status !== 'running' || request.paused || job.signature !== digest(this.requestSnapshot(request.id))) {
+    if (job.status !== 'running' || request.paused || job.signature !== this.requestSignature(request.id)) {
       this.store.patch('workflowJobs', job.id, { status: 'superseded', error: '보고 중 작업 결과가 변경되었습니다.' });
       return null;
     }
@@ -260,7 +337,7 @@ export class TaskWorkflow {
       for (const task of this.store.list('tasks')) {
         if (task.requestId) continue;
         const source = task.originSessionId && this.store.get('sessions', task.originSessionId);
-        let request = source && this.store.list('requests').find(item => item.sourceSessionId === source.id);
+        let request = source && this.store.list('requests').find(item => !item.deletedAt && item.sourceSessionId === source.id);
         request ||= this.request(source?.prompt || task.description || task.title, task.projectId, task.createdBy || 'user',
           { legacy: true, paused: true, sourceSessionId: source?.id || null });
         this.store.patch('tasks', task.id, { requestId: request.id, legacyReview: true });
@@ -284,6 +361,7 @@ export class TaskWorkflow {
   }
   retryJob(jobId) {
     const job = this.store.require('workflowJobs', jobId);
+    assertWorkNotDeleted(this.store, job.requestId);
     if (!['blocked', 'cancelled'].includes(job.status)) fail('중단된 후속 처리만 다시 요청할 수 있습니다.');
     if (this.store.list('sessions').some(session => session.workflowJobId === jobId && live(session))) fail('이전 실행이 아직 종료되지 않았습니다.');
     if (job.taskId) {

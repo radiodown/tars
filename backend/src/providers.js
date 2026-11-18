@@ -1,10 +1,6 @@
-import { spawn } from 'node:child_process';
-import { readFile, readdir, mkdir, appendFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { DATA } from './store.js';
-import { codexAccountSchema, outputSchemaFor } from './contracts.js';
-import { createTerminalRecorder } from './terminal.js';
-import { claudeAccessArgs } from './agent-access.js';
+import { launchClaude } from './claude-agent.js';
+import { readFile, readdir } from 'node:fs/promises';
+import { codexAccountSchema } from './contracts.js';
 import { executable } from './executables.js';
 import { validateModelSettings } from './model-catalog.js';
 export { executable } from './executables.js';
@@ -38,106 +34,12 @@ export async function killOwned(session, signal = 'SIGTERM') {
   }
 }
 
-export async function launch({ session, member, cwd, prompt, minutes, onEvent, onSpawn, onIdentity, codexServers }) {
+export async function launch(options) {
+  const { session, member, codexServers } = options;
   const command = providerCommand(session);
   const binary = await executable(command);
   if (!binary) throw new Error(`${command} CLI를 찾을 수 없습니다. 선택한 계정의 실행 명령과 PATH 설정을 확인하세요.`);
-  if (session.provider === 'codex') {
-    return codexServers.launch({ binary, session, member, cwd, prompt, minutes, onEvent, onIdentity });
-  }
+  if (session.provider === 'codex') return codexServers.launch({ ...options, binary });
   await validateModelSettings(member);
-  const directory = join(DATA, 'sessions', session.id);
-  await mkdir(directory, { recursive: true });
-  const terminal = createTerminalRecorder(directory);
-  terminal.write('SESSION', `${member.name} · ${command} · ${member.model || 'CLI 기본 모델'}\n작업 디렉토리: ${cwd}`);
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', ...claudeAccessArgs(session.processToken)];
-  if (session.resumeClaudeId) args.push('--resume', session.resumeClaudeId);
-  if (member.model) args.push('--model', member.model);
-  if (member.reasoning && member.reasoning !== 'default') args.push('--effort', member.reasoning);
-  if (outputSchemaFor(session.kind)) args.push('--json-schema', JSON.stringify(outputSchemaFor(session.kind)));
-  const child = spawn(binary, args, {
-    cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, TARS_SESSION_TOKEN: session.processToken },
-  });
-  if (child.pid) {
-    try { onSpawn(child.pid); }
-    catch (error) { process.kill(-child.pid, 'SIGKILL'); throw error; }
-  }
-  let buffer = '', stderr = '', output = '', structured = null, providerSessionId = null;
-  let failure = null, stopped = false, settled = false, totalBytes = 0;
-  let killTimer;
-  const logPath = join(directory, 'activity.log');
-  let logQueue = Promise.resolve();
-  function log(message) {
-    const line = `${new Date().toISOString()} ${message}\n`;
-    logQueue = logQueue.then(() => appendFile(logPath, line)).catch(() => {});
-  }
-  function notify(message, extra = {}) {
-    log(message);
-    try { onEvent(message, extra); } catch (error) { failure = error.message; cancel(); }
-  }
-  function cancel(reason = '사용자가 실행을 중지했습니다.') {
-    if (settled) return;
-    stopped = true;
-    failure ||= reason;
-    try { if (child.pid) process.kill(-child.pid, 'SIGTERM'); } catch { /* Already exited. */ }
-    if (!killTimer) killTimer = setTimeout(() => {
-      try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { /* Already exited. */ }
-    }, 3000);
-  }
-  function parse(line) {
-    let event;
-    try { event = JSON.parse(line); } catch { return; }
-    if (!event || typeof event !== 'object') return;
-    terminal.event(member.provider, event);
-    if (event.type === 'system' && event.session_id) providerSessionId = event.session_id;
-    if (event.type === 'assistant') {
-      const blocks = Array.isArray(event.message?.content) ? event.message.content.filter(Boolean) : [];
-      const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
-      if (text) { output = text; notify('응답을 작성하고 있습니다.', { output,
-        ...(blocks.some(block => block.type === 'tool_use') ? { activityNote: text.slice(0, 1000) } : {}) }); }
-      for (const block of blocks.filter(b => b.type === 'tool_use')) notify(`작업 중: ${block.name}`);
-    }
-    if (event.type === 'result') {
-      output = typeof event.result === 'string' ? event.result : output;
-      structured = event.structured_output || null;
-      providerSessionId = event.session_id || providerSessionId;
-      if (event.is_error || (typeof event.subtype === 'string' && event.subtype.startsWith('error'))) failure = (Array.isArray(event.errors) ? event.errors.join('\n') : '') || output || 'Claude 실행 오류';
-      if (event.permission_denials?.length) failure ||= '도구 권한이 거부되었습니다. 결과와 권한 설정을 확인하세요.';
-    }
-  }
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  const promise = new Promise(resolve => {
-    child.on('error', error => { failure = error.message; });
-    child.stdout.on('error', error => cancel(error.message));
-    child.stderr.on('error', error => cancel(error.message));
-    child.stdin.on('error', error => { if (error.code !== 'EPIPE') failure = error.message; });
-    child.stdout.on('data', chunk => {
-      totalBytes += Buffer.byteLength(chunk);
-      if (totalBytes > 8 * 1024 * 1024) { cancel('출력 제한 8 MiB를 초과했습니다.'); return; }
-      buffer += chunk.toString();
-      let newline;
-      while ((newline = buffer.indexOf('\n')) !== -1) {
-        parse(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-      }
-    });
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-6000); terminal.write('STDERR', chunk.toString()); });
-    child.on('close', async (code, signal) => {
-      settled = true;
-      clearTimeout(timeout); clearTimeout(killTimer);
-      if (buffer.trim()) parse(buffer);
-      if (code !== 0 && !failure) failure = stderr.trim() || `CLI 종료: ${code ?? signal}`;
-      if (!output && !structured && !failure) failure = 'CLI가 결과를 반환하지 않았습니다.';
-      log(failure ? `종료: ${failure}` : '응답 완료');
-      terminal.write(failure ? 'ERROR' : 'DONE', failure || '응답 완료');
-      await logQueue;
-      await terminal.flush();
-      resolve({ output: output.slice(-80000), structured, providerSessionId, failure, stopped, logPath });
-    });
-  });
-  const timeout = setTimeout(() => cancel(`실행 시간 제한 ${minutes}분을 초과했습니다.`), minutes * 60000);
-  child.stdin.end(prompt);
-  return { promise, cancel };
+  return launchClaude({ ...options, binary });
 }

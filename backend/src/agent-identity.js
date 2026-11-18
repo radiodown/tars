@@ -3,7 +3,7 @@ import { fail } from './contracts.js';
 export function executionIdentity(store, token) {
   if (!token) return { actor: 'user', session: null };
   const session = store.list('sessions').find(item => item.processToken === token);
-  if (!session || !['preparing', 'running'].includes(session.status)) fail('유효한 실행 신원이 필요합니다.', 403);
+  if (!session || !['preparing', 'running', 'waiting_input'].includes(session.status)) fail('유효한 실행 신원이 필요합니다.', 403);
   return { actor: session.memberId, session };
 }
 

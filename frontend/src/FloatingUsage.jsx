@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Boxes, Command, FileText, Plus, Users } from 'lucide-react';
+import { Gauge } from 'lucide-react';
+import { UsageSummary } from './Usage.jsx';
 
+// Reuse the saved corner of the former create button.
 const POSITION_KEY = 'tars:create-corner';
 const CORNERS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
-const ACTIONS = [
-  ['department', '부서 만들기', Users],
-  ['member', 'AI 팀원 추가', Command],
-  ['document', '문서 작성', FileText],
-  ['project', '프로젝트 등록', Boxes],
-];
 const transform = ({ x, y }) => `translate3d(${x}px, ${y}px, 0)`;
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
@@ -20,15 +16,16 @@ function savedCorner() {
   return 'bottom-right';
 }
 
-export function FloatingCreate({ expanded, onOpenChange, onCreate, disabled }) {
+export function FloatingUsage({ disabled }) {
   const [corner, setCorner] = useState(savedCorner);
   const [phase, setPhase] = useState('idle');
   const [target, setTarget] = useState(corner);
+  const [expanded, setExpanded] = useState(false);
   const cornerRef = useRef(corner);
   const areaRef = useRef(null);
   const dockRef = useRef(null);
   const buttonRef = useRef(null);
-  const menuRef = useRef(null);
+  const panelRef = useRef(null);
   const pointerRef = useRef(null);
   const animationRef = useRef(null);
   const frameRef = useRef(null);
@@ -132,19 +129,6 @@ export function FloatingCreate({ expanded, onOpenChange, onCreate, disabled }) {
     return () => window.removeEventListener('blur', cancelDrag);
   }, [cancelDrag]);
 
-  useEffect(() => {
-    if (!expanded) return;
-    const focusFrame = requestAnimationFrame(() => menuRef.current?.querySelector('[role="menuitem"]')?.focus({ preventScroll: true }));
-    const outside = event => {
-      if (!dockRef.current?.contains(event.target)) onOpenChange(false);
-    };
-    document.addEventListener('pointerdown', outside);
-    return () => {
-      cancelAnimationFrame(focusFrame);
-      document.removeEventListener('pointerdown', outside);
-    };
-  }, [expanded, onOpenChange]);
-
   function nearest(point, corners) {
     return CORNERS.reduce((best, candidate) => distance(point, corners[candidate]) < distance(point, corners[best]) ? candidate : best, cornerRef.current);
   }
@@ -167,7 +151,7 @@ export function FloatingCreate({ expanded, onOpenChange, onCreate, disabled }) {
     if (!pointer.moved) {
       pointer.moved = true;
       suppressClickRef.current = true;
-      onOpenChange(false);
+      panelRef.current.hidePopover();
       setPhase('dragging');
     }
     const { width, height, corners } = bounds();
@@ -202,51 +186,28 @@ export function FloatingCreate({ expanded, onOpenChange, onCreate, disabled }) {
     snapTo(nextCorner, true, pointer.moved && !cancelled);
   }
 
-  function closeMenu(restoreFocus = false) {
-    onOpenChange(false);
-    if (restoreFocus) buttonRef.current?.focus({ preventScroll: true });
-  }
-
   function triggerKeyDown(event) {
     const directions = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
     if (event.altKey && directions.includes(event.key)) {
       event.preventDefault();
-      closeMenu();
       const [vertical, horizontal] = cornerRef.current.split('-');
       const nextVertical = event.key === 'ArrowUp' ? 'top' : event.key === 'ArrowDown' ? 'bottom' : vertical;
       const nextHorizontal = event.key === 'ArrowLeft' ? 'left' : event.key === 'ArrowRight' ? 'right' : horizontal;
       snapTo(`${nextVertical}-${nextHorizontal}`);
-    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      onOpenChange(true);
     } else if (event.key === 'Escape') {
       cancelDrag();
-      closeMenu(true);
     }
   }
 
-  function menuKeyDown(event) {
-    const items = Array.from(menuRef.current.querySelectorAll('[role="menuitem"]'));
-    const index = items.indexOf(document.activeElement);
-    if (event.key === 'Escape' || event.key === 'Tab') {
-      if (event.key === 'Escape') event.preventDefault();
-      closeMenu(true);
-    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault();
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-      items[next]?.focus();
-    }
-  }
-
-  return <div className="floating-create-area" ref={areaRef} data-phase={phase}>
-    <div className="floating-create-targets" aria-hidden="true">
-      {CORNERS.map(value => <span key={value} className="floating-create-target" data-corner={value} data-active={target === value} />)}
+  return <div className="floating-usage-area" ref={areaRef} data-phase={phase}>
+    <div className="floating-usage-targets" aria-hidden="true">
+      {CORNERS.map(value => <span key={value} className="floating-usage-target" data-corner={value} data-active={target === value} />)}
     </div>
-    <div className="floating-create" ref={dockRef} data-corner={corner} data-phase={phase} data-expanded={expanded}
-      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onOpenChange(false); }}>
-      <button className="floating-create-trigger" ref={buttonRef} type="button" disabled={disabled}
-        aria-haspopup="menu" aria-expanded={expanded} aria-controls="floating-create-menu" aria-describedby="floating-create-help"
-        title="새로 만들기 · 드래그하여 위치 이동"
+    <div className="floating-usage" ref={dockRef} data-corner={corner} data-phase={phase}>
+      <button className="floating-usage-trigger" ref={buttonRef} type="button" disabled={disabled}
+        aria-label="사용량 보기" aria-haspopup="dialog" aria-expanded={expanded} aria-describedby="floating-usage-help"
+        popoverTarget="floating-usage-panel"
+        title="사용량 보기 · 드래그하여 위치 이동"
         onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={event => finishDrag(event)}
         onPointerCancel={event => finishDrag(event, true)} onLostPointerCapture={event => finishDrag(event, true)}
         onKeyDown={triggerKeyDown}
@@ -254,19 +215,19 @@ export function FloatingCreate({ expanded, onOpenChange, onCreate, disabled }) {
           if (event.detail > 0 && suppressClickRef.current) {
             suppressClickRef.current = false;
             event.preventDefault();
-            return;
           }
-          onOpenChange(!expanded);
         }}>
-        <span className="floating-create-plus"><Plus size={21} strokeWidth={2} /></span>
-        <span>새로 만들기</span>
+        <Gauge size={16} strokeWidth={2} />
       </button>
-      <span id="floating-create-help" className="floating-create-help">드래그하거나 Alt와 방향키를 함께 눌러 네 모서리로 이동할 수 있습니다.</span>
-      {expanded && <div className="floating-create-menu" id="floating-create-menu" role="menu" aria-label="새로 만들기" ref={menuRef} onKeyDown={menuKeyDown}>
-        <div className="floating-create-menu-label" role="presentation">새로 만들기</div>
-        {ACTIONS.map(([type, label, Icon]) => <button key={type} type="button" role="menuitem" tabIndex={-1} onClick={() => { closeMenu(true); onCreate(type); }}><Icon size={17} strokeWidth={1.7} /><span>{label}</span></button>)}
-        <p role="presentation">버튼을 끌어 모서리로 옮길 수 있어요</p>
-      </div>}
+      <span id="floating-usage-help" className="floating-usage-help">드래그하거나 Alt와 방향키를 함께 눌러 네 모서리로 이동할 수 있습니다.</span>
+      <div id="floating-usage-panel" className="floating-usage-panel" ref={panelRef} popover="auto" role="dialog" aria-label="사용량" tabIndex={-1}
+        onToggle={event => {
+          const open = event.newState === 'open';
+          setExpanded(open);
+          if (open) event.currentTarget.focus({ preventScroll: true });
+        }}>
+        {expanded && <UsageSummary onDetails={() => panelRef.current.hidePopover()} />}
+      </div>
     </div>
   </div>;
 }

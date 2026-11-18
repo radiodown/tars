@@ -2,8 +2,9 @@ import { now } from './store.js';
 import { fail, approvalResponseSchema } from './contracts.js';
 import { digest } from './task-artifacts.js';
 import { sessionBelongsToRequest } from '../../shared/work-requests.mjs';
+import { workProgress } from '../../shared/work-progress.mjs';
 
-const live = session => ['preparing', 'running', 'stopping'].includes(session?.status);
+const live = session => ['preparing', 'running', 'waiting_input', 'stopping'].includes(session?.status);
 const ordered = values => values.sort((a, b) => a.id.localeCompare(b.id));
 
 // Approval snapshots are immutable. Documents can keep evolving without changing
@@ -16,14 +17,25 @@ export class WorkApprovals {
       id: task.id, title: task.title, description: task.description, acceptance: task.acceptance,
       assigneeId: task.assigneeId, departmentId: task.departmentId, projectId: task.projectId,
       dependsOn: task.dependsOn || [], documentIds: task.documentIds || [], isolation: task.isolation,
+      ...(task.goalId ? { goalId: task.goalId, plannedUnits: task.plannedUnits } : {}),
     })));
     const refs = new Set(tasks.flatMap(task => task.documentIds));
     const documents = ordered(this.store.list('documents').filter(doc =>
       (doc.requestId === requestId && ['agreement', 'specification'].includes(doc.kind)) || refs.has(doc.id))
       .map(doc => ({ id: doc.id, title: doc.title, kind: doc.kind, version: doc.version, content: doc.content })));
-    return { title: request.title, instruction: request.instruction, projectId: request.projectId, documents, tasks };
+    return { title: request.title, instruction: request.instruction, projectId: request.projectId, documents, tasks,
+      ...(request.progressPlan ? { progressPlan: request.progressPlan } : {}),
+      ...(request.approvalMode ? { acceptance: request.acceptance || '', approvalMode: request.approvalMode, allowManagerImplementation: Boolean(request.allowManagerImplementation) } : {}) };
   }
-  scopeSignature(requestId) { return digest(this.scope(requestId)); }
+  signedScope(requestId) {
+    const request = this.store.require('requests', requestId);
+    if (!request.approvalMode) return this.scope(requestId); // Preserve approvals issued under the old exact-version policy.
+    return { instruction: request.instruction, acceptance: request.acceptance || '', projectId: request.projectId,
+      ...(request.progressPlan ? { progressPlan: request.progressPlan } : {}),
+      approvalMode: request.approvalMode, allowManagerImplementation: Boolean(request.allowManagerImplementation),
+      ...(request.approvalMode === 'tasks' ? { tasks: this.scope(requestId).tasks } : {}) };
+  }
+  scopeSignature(requestId) { return digest(this.signedScope(requestId)); }
   reportSignature(requestId, documentId) {
     const doc = this.store.require('documents', documentId);
     return digest({ scope: this.scopeSignature(requestId), document: [doc.id, doc.version, doc.content],
@@ -39,6 +51,7 @@ export class WorkApprovals {
   executionBlockReason(requestId) {
     if (!requestId) return null;
     const request = this.store.require('requests', requestId);
+    if (request.deletedAt) return '삭제된 업무입니다.';
     if (request.paused) return '사용자가 업무 진행을 중지했습니다.';
     if (request.status === 'accepted') return '사용자 확인이 끝난 업무입니다.';
     if (!request.approvalRequired) return null; // Preserve legacy jobs; never invent historical approval.
@@ -66,7 +79,8 @@ export class WorkApprovals {
   submitReport(requestId, sourceSessionId, documentId) {
     const doc = this.store.require('documents', documentId);
     const source = this.store.require('sessions', sourceSessionId);
-    const final = source.kind !== 'request_escalation' && this.store.list('tasks').filter(task => task.requestId === requestId)
+    const progress = workProgress(this.store.require('requests', requestId), this.store.list('tasks'));
+    const final = source.kind !== 'request_escalation' && (!progress.planned || progress.complete) && this.store.list('tasks').filter(task => task.requestId === requestId)
       .every(task => ['done', 'cancelled'].includes(task.status));
     return this.submit(requestId, source, 'report',
       this.reportSignature(requestId, documentId), { ...this.scope(requestId), report: { id: doc.id, version: doc.version, title: doc.title, content: doc.content, final } }, doc.content);
@@ -77,7 +91,11 @@ export class WorkApprovals {
     return this.store.transaction(() => {
       const request = this.store.require('requests', requestId);
       const pending = request.pendingApprovalId && this.store.get('workApprovals', request.pendingApprovalId);
-      if (pending?.status === 'pending' && pending.kind === kind && pending.signature === signature && pending.content === content) return pending;
+      if (pending?.status === 'pending' && pending.kind === kind && pending.signature === signature && pending.content === content) {
+        const status = kind === 'plan' ? 'awaiting_approval' : 'awaiting_acceptance';
+        if (request.status !== status) this.store.patch('requests', requestId, { status });
+        return pending;
+      }
       if (pending?.status === 'pending') this.store.patch('workApprovals', pending.id, { status: 'superseded' });
       const followup = request.followupJobId && this.store.get('workflowJobs', request.followupJobId);
       if (followup && followup.sessionId !== source.id && ['queued', 'running', 'blocked', 'cancelled'].includes(followup.status)) {
@@ -95,22 +113,41 @@ export class WorkApprovals {
   }
   respond(requestId, approvalId, raw, actor = 'user') {
     if (actor !== 'user') fail('사용자만 협의안과 보고서를 승인하거나 의견을 남길 수 있습니다.', 403);
+    const request = this.store.require('requests', requestId);
+    if (request.deletedAt) fail('삭제된 업무입니다.', 404);
     const input = approvalResponseSchema.parse(raw);
     const approval = this.store.require('workApprovals', approvalId);
     if (approval.requestId !== requestId) fail('이 업무의 승인 요청이 아닙니다.', 400);
+    if (input.decision === 'rescope') {
+      if (approval.kind !== 'report' || approval.snapshot.report.final) fail('차단 보고에서만 이 선택을 사용할 수 있습니다.', 400);
+      input.decision = 'feedback';
+    }
     if (approval.response) {
       if (approval.response.decision === input.decision && approval.response.comment === input.comment) {
         return { approval, job: approval.followupJobId ? this.store.require('workflowJobs', approval.followupJobId) : null };
       }
       fail('이미 처리한 요청입니다. 최신 협의안 또는 보고서를 확인하세요.');
     }
-    const request = this.store.require('requests', requestId);
     if (approval.status !== 'pending' || request.pendingApprovalId !== approvalId) fail('최신 승인 대기 항목이 아닙니다. 화면을 새로고침하세요.');
     const source = this.store.require('sessions', approval.sourceSessionId);
     if (live(source)) fail('담당 AI의 응답이 정상 종료된 뒤 의견을 전달할 수 있습니다.');
     if (source.status !== 'completed' && input.decision === 'approve') fail('정상 종료되지 않은 응답은 승인할 수 없습니다. 의견을 보내 협의안을 다시 요청하세요.');
     const signature = approval.kind === 'plan' ? this.scopeSignature(requestId) : this.reportSignature(requestId, approval.snapshot.report.id);
     if (signature !== approval.signature && input.decision === 'approve') fail('문서 또는 작업 내용이 변경되었습니다. 의견을 보내 최신 협의안·보고서를 요청하세요.');
+    const blockedReport = approval.kind === 'report' && !approval.snapshot.report.final;
+    if (['retry', 'stop'].includes(input.decision)) {
+      if (!blockedReport) fail('차단 보고에서만 이 선택을 사용할 수 있습니다.', 400);
+      if (input.decision === 'retry' && request.approvedPlanId && this.store.get('workApprovals', request.approvedPlanId)?.signature !== this.scopeSignature(requestId)) fail('범위가 변경되었습니다. 먼저 재협의하세요.');
+      return this.store.transaction(() => {
+        const saved = this.store.patch('workApprovals', approvalId, { status: 'approved', response: { ...input, actor, at: now() } });
+        this.store.patch('requests', requestId, { pendingApprovalId: null, followupJobId: null, paused: input.decision === 'stop', status: input.decision === 'stop' ? 'blocked' : 'open' });
+        for (const task of this.store.list('tasks').filter(task => task.requestId === requestId)) {
+          if (input.decision === 'retry' && task.status === 'blocked' && task.assigneeId && task.acceptance?.trim()) this.store.patch('tasks', task.id, { status: 'queued', automationPaused: false, error: null, completedUnits: 0, blocker: null });
+        }
+        this.record(saved, 'user_response', input.decision === 'stop' ? '업무 중단' : '차단 작업 재시도', actor);
+        return { approval: saved, job: null };
+      });
+    }
     const member = this.store.get('members', approval.memberId);
     if (!member || !['leader', 'ceo'].includes(member.role)) fail('원래 담당 AI를 찾을 수 없습니다. 담당 조직을 확인하세요.');
     // Acknowledgements are state transitions. Invoke the manager only for real
@@ -153,7 +190,7 @@ export class WorkApprovals {
     // approvals or interrupting work already in the execution pipeline.
     const tasks = this.store.list('tasks'), sessions = this.store.list('sessions');
     for (const request of this.store.list('requests')) {
-      if (this.store.list('workApprovals').some(item => item.requestId === request.id)) continue;
+      if (request.deletedAt || this.store.list('workApprovals').some(item => item.requestId === request.id)) continue;
       const work = tasks.filter(task => task.requestId === request.id);
       if (work.some(task => ['queued', 'running', 'review'].includes(task.status))
         || sessions.some(session => live(session) && (sessionBelongsToRequest(session, request.id) || work.some(task => task.id === session.taskId)))) continue;

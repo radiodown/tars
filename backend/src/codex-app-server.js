@@ -5,8 +5,11 @@ import { outputSchemaFor } from './contracts.js';
 import { createTerminalRecorder } from './terminal.js';
 import { appServerTransport } from './app-server-transport.js';
 import { inspectLoadedGuidance } from './guidance.js';
-import { CODEX_THREAD_ACCESS, CODEX_TURN_ACCESS } from './agent-access.js';
+import { codexThreadAccess, codexTurnAccess, codexAccessConfig, TARS_TOOL_NAMES } from './agent-access.js';
+import { codexInteraction, codexResponse } from './provider-interactions.js';
+import { executionDeadline } from './session-interactions.js';
 import { createSessionActivity } from './session-activity.js';
+import { codexChatInput, normalizeSkills } from './chat-skills.js';
 
 export class CodexAppServers {
   constructor(store, killOwned) {
@@ -37,14 +40,14 @@ export class CodexAppServers {
         cwd: DATA, processToken,
         onSpawn: pid => this.store.put('appServerProcesses', { id: account, pid, processToken }),
         onNotification: (method, params) => listeners.get(params.threadId)?.event(method, params),
-        onRequest: (method, params, granted) => listeners.get(params.threadId)?.request(method, granted),
+        onRequest: (method, params, requestId, signal) => listeners.get(params.threadId)?.request(method, params, requestId, signal),
         onFailure: error => { for (const listener of listeners.values()) listener.failed(error); },
       });
       entry = { rpc, listeners };
       this.accounts.set(account, entry);
       entry.ready = (async () => {
         try {
-          await rpc.call('initialize', { clientInfo: { name: 'tars', title: 'Tars', version: '1.0.0' } });
+          await rpc.call('initialize', { clientInfo: { name: 'tars', title: 'Tars', version: '1.0.0' }, capabilities: { experimentalApi: true, requiredHumanApproval: true } });
           rpc.notify('initialized');
         } catch (error) { await rpc.close(error); throw error; }
       })();
@@ -53,14 +56,17 @@ export class CodexAppServers {
     if (this.closing) throw new Error('App Server가 종료 중입니다.');
     return entry;
   }
-  launch({ binary, session, member, cwd, prompt, minutes, onEvent, onIdentity }) {
+  launch({ binary, session, member, cwd, prompt, minutes, onEvent, onIdentity, onInteraction, isWaiting }) {
     const account = session.codexAccount || 'codex';
     let entry, threadId, turnId, stopped = false, settled = false, interrupting = false;
     let failure = null, output = '', finalOutput = null, providerTurnStatus = null, terminal;
-    let timeout, interruptTimer, progressTimer, pendingProgress;
+    let deadline, interruptTimer, progressTimer, pendingProgress;
+    const items = new Map();
+    const inputAbort = new AbortController();
     let acceptingTurn = false, ownsListener = false, receivedBytes = 0;
     const messages = new Map();
     const activity = createSessionActivity();
+    let availableSkills = [];
     let resolveTurn;
     const finished = new Promise(resolve => { resolveTurn = resolve; });
     const directory = join(DATA, 'sessions', session.id);
@@ -98,6 +104,7 @@ export class CodexAppServers {
     function cancel(reason = '사용자가 실행을 중지했습니다.') {
       if (settled || providerTurnStatus) return;
       stopped = true;
+      inputAbort.abort();
       failure ||= reason;
       interrupt();
     }
@@ -106,6 +113,8 @@ export class CodexAppServers {
       const eventTurnId = params.turnId || params.turn?.id;
       if (!eventTurnId || (turnId && eventTurnId !== turnId)) return;
       rememberTurn(eventTurnId);
+      if (params.item?.type === 'fileChange') items.set(params.item.id, params.item);
+      if (method === 'turn/diff/updated') onIdentity({ diff: String(params.diff || '').slice(0, 500000), diffTruncated: String(params.diff || '').length > 500000 });
       terminal.appServerEvent(method, params);
       if (activity.event(method, params)) {
         const snapshot = activity.snapshot();
@@ -143,14 +152,14 @@ export class CodexAppServers {
         await mkdir(directory, { recursive: true });
         terminal = createTerminalRecorder(directory);
         terminal.write('SESSION', `${member.name} · ${account} · App Server · ${session.model}\n작업 디렉토리: ${cwd}`);
-        timeout = setTimeout(() => cancel(`실행 시간 제한 ${minutes}분을 초과했습니다.`), minutes * 60000);
+        deadline = executionDeadline(minutes * 60000, () => cancel(`실행 시간 제한 ${minutes}분을 초과했습니다.`), isWaiting);
         if (stopped) throw new Error(failure);
         entry = await this.connection(account, binary);
         if (stopped) throw new Error(failure);
         // Refresh discovery before creating/resuming the thread's skill context.
         const listed = await entry.rpc.call('skills/list', { cwds: [cwd], forceReload: true });
         if (stopped) throw new Error(failure);
-        const configuration = { cwd, ...CODEX_THREAD_ACCESS, model: member.model || null };
+        const configuration = { cwd, ...codexThreadAccess(session), model: member.model || null, config: codexAccessConfig(session.processToken) };
         const previousId = session.resumeThreadId;
         const response = await entry.rpc.call(previousId ? 'thread/resume' : 'thread/start', {
           ...configuration, ...(previousId ? { threadId: previousId, excludeTurns: true } : {}),
@@ -164,6 +173,7 @@ export class CodexAppServers {
         if (stopped) throw new Error(failure);
         try {
           const loaded = await inspectLoadedGuidance(session.guidance, response, listed, cwd);
+          availableSkills = normalizeSkills({ data: [{ cwd, skills: loaded.availableSkills }] }, cwd).skills;
           await writeFile(join(directory, 'guidance.md'), `# ${member.name} · 세션 지침 로딩 결과\n\n작업 경로: ${cwd}\n\nThread: ${threadId}\n\n지침 버전: ${session.guidance.hash}\n\n## 자동 적용 크기\n\n${loaded.instructionBytes} / 32768 bytes (UTF-8 본문과 구분자 기준; 토큰 수 아님)\n\n${loaded.guidanceWarnings.map(warning => `- ${warning}`).join('\n') || '크기·동일 본문 경고 없음'}\n\n## 실제 적용된 지침\n\n${loaded.instructionFiles.map(file => `- ${file.path}: ${file.bytes} bytes${file.duplicateOf ? ` · 중복: ${file.duplicateOf}` : ''}`).join('\n')}\n\n## 발견된 스킬\n\n${loaded.availableSkills.map(skill => `- ${skill.name}: ${skill.path}`).join('\n') || '없음'}\n\n스킬 목록은 발견 여부를 나타내며 실제 사용 여부는 실행 기록에서 확인합니다. 필요할 때 읽는 지침도 실제 원문 열람 여부는 실행 기록에서 확인합니다.\n`);
           onIdentity({ ...loaded, progress: previousId ? '이전 대화를 이어가는 중' : '새 대화를 시작하는 중' });
           terminal.write('GUIDANCE', `적용 지침:\n${loaded.instructionSources.join('\n')}\n발견된 스킬: ${loaded.availableSkills.map(skill => skill.name).join(', ') || '없음'}`);
@@ -175,17 +185,32 @@ export class CodexAppServers {
         if (stopped) throw new Error(failure);
         entry.listeners.set(threadId, {
           event,
-          request: (method, granted) => {
-            if (granted) { terminal.write('PERMISSION', `최대 권한 정책으로 허용: ${method}`); return; }
-            terminal.write('BLOCKED', `지원하지 않는 추가 승인/입력 요청: ${method}`);
-            cancel(`추가 승인 또는 입력이 필요하여 중단했습니다: ${method}`);
+          request: async (method, params, requestId, signal) => {
+            if (settled || stopped || (params.turnId && turnId && params.turnId !== turnId)) throw new Error('종료되었거나 다른 턴의 요청입니다.');
+            if (params.turnId) rememberTurn(params.turnId);
+            const request = codexInteraction(method, params, items.get(params.itemId));
+            if (!request) { terminal.write('UNSUPPORTED', `지원하지 않는 서버 요청: ${method}`); throw new Error(`지원하지 않는 서버 요청: ${method}`); }
+            if (!onInteraction) throw new Error('사용자 입력 처리기가 연결되지 않았습니다.');
+            const response = await onInteraction({ ...request, providerRequestId: requestId, turnId: params.turnId }, {
+              signal: AbortSignal.any([signal || new AbortController().signal, inputAbort.signal]),
+              onWaiting: params.isBlocking === false ? () => {} : value => deadline.waiting(value),
+            });
+            if (request.kind === 'question' && response.decision === 'cancel') cancel('사용자가 질문을 취소했습니다.');
+            terminal.write('USER', `${request.title}: ${response.decision}`);
+            return codexResponse(method, params, response);
           },
           failed: error => { failure ||= error.message; resolveTurn(); },
         });
         ownsListener = true;
+        const inventory = await entry.rpc.call('mcpServerStatus/list', { threadId, serverName: 'tars', limit: 100 });
+        const tars = inventory.data?.find(server => server.name === 'tars');
+        const tools = Object.values(tars?.tools || {}).map(tool => tool.name);
+        const missing = TARS_TOOL_NAMES.filter(name => !tools.includes(name));
+        if (!tars || tars.toolsError || missing.length) throw new Error(`TARS 도구 준비 실패: ${tars?.toolsError || missing.join(', ')}`);
+        onIdentity({ toolsReady: true });
         acceptingTurn = true;
         const started = await entry.rpc.call('turn/start', {
-          threadId, input: [{ type: 'text', text: prompt }], cwd, ...CODEX_TURN_ACCESS,
+          threadId, input: codexChatInput(prompt, session.prompt, availableSkills), cwd, ...codexTurnAccess(session, cwd),
           model: member.model || null, effort: session.reasoning === 'default' ? null : session.reasoning,
           summary: 'auto',
           ...(outputSchemaFor(session.kind) ? { outputSchema: outputSchemaFor(session.kind) } : {}),
@@ -206,7 +231,7 @@ export class CodexAppServers {
         }
       } finally {
         settled = true;
-        clearTimeout(timeout); clearTimeout(interruptTimer); clearTimeout(progressTimer);
+        deadline?.close(); inputAbort.abort(); clearTimeout(interruptTimer); clearTimeout(progressTimer);
         if (ownsListener) entry.listeners.delete(threadId);
         // Wait for cleanup on connection failure before releasing the member's slot.
         if (entry?.rpc.failed) await entry.rpc.closed;
@@ -220,10 +245,10 @@ export class CodexAppServers {
         activity: activity.snapshot(), activityNote: pendingProgress?.extra.activityNote };
     })();
     return {
-      promise, cancel,
+      promise, cancel, waiting: value => deadline?.waiting(value),
       async steer(prompt) {
         if (stopped || settled || providerTurnStatus || !entry || !turnId) throw Object.assign(new Error('추가 지시를 받을 수 있는 실행 중인 턴이 없습니다.'), { statusCode: 409 });
-        await entry.rpc.call('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text: prompt }] });
+        await entry.rpc.call('turn/steer', { threadId, expectedTurnId: turnId, input: codexChatInput(prompt, prompt, availableSkills) });
         terminal.write('USER', prompt);
       },
     };

@@ -1,0 +1,39 @@
+.record-toolbar { display: grid; gap: 14px; margin-bottom: 18px; }
+.record-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.record-filters button { display: inline-flex; align-items: center; gap: 9px; min-height: 38px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--muted); }
+.record-filters button[aria-pressed='true'] { border-color: var(--green); color: var(--ink); background: var(--raised); }
+.record-filters button span { font-size: 11px; font-variant-numeric: tabular-nums; }
+.record-search-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.record-search { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 180px; padding: 0 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface); }
+.record-search input { width: 100%; min-width: 0; min-height: 40px; border: 0; background: transparent; color: var(--ink); }
+.record-search-controls select { max-width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink); }
+.record-count { color: var(--muted); font-size: 12px; }
+.record-more { margin: 12px 16px; min-height: 36px; }
+.record-chevron { transition: transform .16s; transform: rotate(-90deg); color: var(--muted); }
+[aria-expanded='true'] > .record-chevron { transform: rotate(0); }
+.session-group-list { overflow: hidden; }
+.session-group + .session-group { border-top: 1px solid var(--line); }
+.session-group-summary { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 80px; padding: 16px 18px; border: 0; background: transparent; color: var(--ink); text-align: left; }
+.session-group-summary:hover, .session-group-summary[aria-expanded='true'] { background: var(--raised); }
+.session-group-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.session-group-copy strong { display: block; font-size: 14px; }
+.session-group-copy small { display: block; margin-top: 6px; color: var(--muted); line-height: 1.6; }
+.session-group-meta { display: grid; gap: 5px; text-align: right; flex-shrink: 0; }
+.session-group-meta strong { font-size: 12px; font-weight: 500; }
+.session-group-meta small { color: var(--muted); }
+.session-group-runs { border-top: 1px solid var(--line); padding: 0 18px 8px 48px; }
+.session-group-context { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 14px 0 4px; font-size: 11px; color: var(--muted); }
+.session-group-context a { text-decoration: underline; text-underline-offset: 3px; }
+.session-group-runs .session-history-row { border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); padding: 14px 0; }
+.session-group-runs .session-history-row:hover { background: var(--raised); }
+.session-group-runs .session-history-row > span:first-child small { display: block; margin-top: 5px; color: var(--muted); }
+.session-group-runs .session-history-row > small { color: var(--muted); }
+@media (max-width: 700px) {
+  .record-search { flex-basis: 100%; }
+  .record-search-controls select { flex: 1; min-width: 0; }
+  .session-group-summary { flex-wrap: wrap; gap: 10px; padding: 14px; }
+  .session-group-copy { flex-basis: calc(100% - 30px); }
+  .session-group-summary > .badge { margin-left: 27px; }
+  .session-group-meta { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .session-group-runs { padding: 0 14px 8px 20px; }
+}

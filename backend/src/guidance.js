@@ -3,7 +3,8 @@ import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, rmdir,
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DATA } from './store.js';
 import { fail } from './contracts.js';
-import { agentAccessInstructions, DEFAULT_INSTRUCTIONS, LEGACY_DEFAULT_INSTRUCTIONS, PREVIOUS_DEFAULT_INSTRUCTIONS, PREVIOUS_WORK_INSTRUCTIONS, PREVIOUS_REGISTRATION_INSTRUCTIONS } from './agent-access.js';
+import { WORK_PROGRESS_GUIDE, WORK_PROGRESS_GUIDE_TITLE } from './work-progress.js';
+import { agentAccessInstructions, DEFAULT_INSTRUCTIONS, LEGACY_DEFAULT_INSTRUCTIONS, PREVIOUS_DEFAULT_INSTRUCTIONS, PREVIOUS_WORK_INSTRUCTIONS, PREVIOUS_REGISTRATION_INSTRUCTIONS, PREVIOUS_APPROVAL_INSTRUCTIONS } from './agent-access.js';
 
 export const GUIDANCE_CONFIG = { project_root_markers: ['.tars-root'], project_doc_max_bytes: 32 * 1024 };
 export const memberDirectory = member => member.role === 'ceo'
@@ -13,7 +14,7 @@ export const appliesTo = (doc, member, projectId) => (!doc.departmentId || doc.d
   && (!doc.projectId || doc.projectId === projectId);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sharedSkills = join(DATA, 'shared', 'skills');
-const commonRules = '자동 적용된 지침은 변경 확인이 필요한 경우에만 다시 읽으세요. 참고 지침은 명시된 적용 조건이 현재 작업에 맞을 때 해당 원문만 읽으세요. 관련 스킬의 SKILL.md와 필요한 참고 자료만 읽으세요. 내부 추론 대신 진행 단계와 차단 사항을 짧게 알리세요. 작업 종료 보고에는 받은 지시, 수행한 task, 결과·산출물, 검증·미검증, 미완료·차단 사유를 구분하세요. TARS가 이력을 저장하므로 별도 이력 파일을 직접 수정하지 마세요. 실행 종료와 검토 완료는 다릅니다. 관리자는 배정·보고 전에 제공된 조직 상태 파일의 확인 시각과 담당자 실행 여부를 확인하세요.';
+const commonRules = '자동 적용된 지침은 변경 확인이 필요한 경우에만 다시 읽으세요. 참고 지침은 명시된 적용 조건이 현재 작업에 맞을 때 해당 원문만 읽으세요. 관련 스킬의 SKILL.md와 필요한 참고 자료만 읽으세요. 내부 추론 대신 진행 단계와 차단 사항을 짧게 알리세요. 작업 종료 보고에는 받은 지시, 수행한 task, 결과·산출물, 검증·미검증, 미완료·차단 사유를 구분하세요. TARS가 이력을 저장하므로 별도 이력 파일을 직접 수정하지 마세요. 실행 종료와 검토 완료는 다릅니다. 관리자는 배정·보고 전에 제공된 조직 상태 파일의 확인 시각과 담당자 실행 여부를 확인하세요. 업무 등록·목표 변경·배정과 수행 수량 보고에는 참고 지침 “업무 목표·진행률·UI 작성 규칙”을 읽고 progressPlan, goalId, plannedUnits, completedUnits 형식을 따르세요.';
 
 export function reviseDocument(store, existing, input) {
   const revisions = [...existing.revisions, { version: existing.version, content: existing.content, title: existing.title,
@@ -22,13 +23,18 @@ export function reviseDocument(store, existing, input) {
 }
 export function initializeDefaultInstructions(store) {
   const documents = store.list('documents');
+  if (!documents.some(doc => doc.builtinKey === 'work-progress-v1' || (doc.kind === 'instruction' && doc.title === WORK_PROGRESS_GUIDE_TITLE))) {
+    store.put('documents', { title: WORK_PROGRESS_GUIDE_TITLE, builtinKey: 'work-progress-v1', kind: 'instruction', instructionMode: 'on_demand',
+      readWhen: '팀장·CEO가 업무를 등록·계획·배정하거나 목표를 변경할 때, 팀원이 수행 수량을 보고할 때',
+      version: 1, revisions: [], projectId: null, departmentId: null, content: WORK_PROGRESS_GUIDE });
+  }
   if (!documents.some(doc => doc.kind === 'instruction')) {
     store.put('documents', { title: '팀 공통 작업 원칙', kind: 'instruction', instructionMode: 'always', version: 1,
       revisions: [], projectId: null, departmentId: null, content: DEFAULT_INSTRUCTIONS });
   }
   // Upgrade only the untouched, TARS-generated default. Keep custom rules and history.
   for (const doc of documents) if (doc.kind === 'instruction' && doc.title === '팀 공통 작업 원칙'
-    && !doc.departmentId && !doc.projectId && [LEGACY_DEFAULT_INSTRUCTIONS, PREVIOUS_DEFAULT_INSTRUCTIONS, PREVIOUS_WORK_INSTRUCTIONS, PREVIOUS_REGISTRATION_INSTRUCTIONS].includes(doc.content)) {
+    && !doc.departmentId && !doc.projectId && [LEGACY_DEFAULT_INSTRUCTIONS, PREVIOUS_DEFAULT_INSTRUCTIONS, PREVIOUS_WORK_INSTRUCTIONS, PREVIOUS_REGISTRATION_INSTRUCTIONS, PREVIOUS_APPROVAL_INSTRUCTIONS].includes(doc.content)) {
     reviseDocument(store, doc, { content: DEFAULT_INSTRUCTIONS });
   }
 }
@@ -133,9 +139,9 @@ async function writeShared(store) {
 export async function syncMember(store, member) {
   const dir = memberDirectory(member);
   const role = member.role === 'ceo'
-    ? 'CEO TARS: 사용자와 대화로 업무를 받고 상위 요청을 관리합니다. 요구사항과 설계, 검토, 팀장·팀원 위임, 실행과 결과 확인을 조율하고 사용자에게 보고합니다. 요청에 필요한 조직 구성과 구현·검증도 수행합니다.'
+    ? 'CEO TARS: 사용자와 대화로 업무를 받고 상위 요청을 관리합니다. 요구사항과 설계, 검토, 팀장·팀원 위임, 실행과 결과 확인을 조율하고 사용자에게 보고합니다. 조직 구성과 위임을 담당하며 기본 실행 권한은 읽기 전용입니다. 사용자에게 승인받은 직접 구현 예외만 적용합니다.'
     : member.role === 'leader'
-      ? '팀장: 사용자와 대화로 받은 업무를 요구사항·설계 문서와 하위 작업으로 기록합니다. 설계 검토와 작업 위임, 구현, 실행, 결과 확인과 보고를 수행합니다. 사용자 요청에 필요한 도구를 직접 사용합니다.'
+      ? '팀장: 사용자와 대화로 받은 업무를 요구사항·설계 문서와 하위 작업으로 기록합니다. 설계 검토와 작업 위임, 결과 확인과 보고를 수행합니다. 구현은 팀원에게 배정하며 승인된 직접 구현 예외만 적용합니다. 사용자 요청에 필요한 도구를 직접 사용합니다.'
       : '팀원: 배정된 범위에서 작업하고 결과, 변경 파일, 차단 사항과 검증 여부를 보고합니다.';
   const department = member.role === 'ceo' ? '전체 조직 · 모든 부서 상위' : store.require('departments', member.departmentId).name;
   await renderFile(join(dir, 'profile.md'), `# ${member.name}\n\n소속: ${department}\n역할: ${member.role}\n도구: ${member.provider}\n${member.provider === 'codex' ? `실행 계정: ${member.codexAccount || 'codex'}\n` : ''}모델: ${member.model || 'CLI 기본값'}\n전문 분야: ${member.specialty}\n`);

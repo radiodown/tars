@@ -1,0 +1,17 @@
+.session-interactions:empty { display: none; }
+.session-interaction, .change-review { margin: 12px 0; padding: 14px; border: 1px solid #8a96a744; border-radius: 10px; min-width: 0; }
+.session-interaction.pending { border-color: #b8832c; background: #b8832c0c; }
+.session-interaction header, .change-review header { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.session-interaction header span { font-size: 12px; }
+.session-interaction fieldset { margin: 12px 0; padding: 10px; border: 1px solid #8a96a744; }
+.session-interaction label { display: grid; gap: 6px; margin: 8px 0; }
+.session-interaction .interaction-option { display: flex; align-items: flex-start; }
+.interaction-option input { width: auto; flex-shrink: 0; }
+.interaction-option small { display: block; opacity: .75; }
+.session-interaction input[type=text], .session-interaction input[type=password], .session-interaction textarea { width: 100%; box-sizing: border-box; }
+.interaction-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.session-interaction pre, .change-diff pre { white-space: pre; overflow: auto; max-height: 420px; font-size: 12px; padding: 8px; }
+.change-diff details { margin: 8px 0; border: 1px solid #8a96a744; }
+.change-diff summary { overflow-wrap: anywhere; padding: 8px; cursor: pointer; }
+.change-diff .diff-added { background: #2fa45a22; }
+.change-diff .diff-removed { background: #de575722; }

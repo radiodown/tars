@@ -106,7 +106,8 @@ test('MCP registers real agents through the API and preserves validation, genera
     const worker = value(await call('tars_create_member', { name: '구현 담당', departmentId: department.id, role: 'member', provider: 'claude' }));
     const unregistered = await call('tars_api', { method: 'POST', path: '/api/tasks', body: { title: '미등록 작업', departmentId: department.id } });
     assert.equal(unregistered.isError, true);
-    const work = value(await call('tars_register_work', { title: 'NGIPS 분석', instruction: '이슈를 분석하고 결과를 보고한다' }));
+    const work = value(await call('tars_register_work', { title: 'NGIPS 분석', instruction: '이슈를 분석하고 결과를 보고한다', acceptance: '분석 근거 확인',
+      progressPlan: { summary: '이슈 분석', goal: '분석 1건 검토', goals: [{ id: 'analysis', title: '이슈 분석', target: 1, unit: '건', weight: 100, acceptance: '원인과 근거 확인' }] } }));
     assert(work.registeredAt);
     const linked = value(await call('tars_register_work', { title: work.title, instruction: work.instruction, requestId: work.id }));
     assert.equal(linked.id, work.id);
@@ -114,7 +115,7 @@ test('MCP registers real agents through the API and preserves validation, genera
       title: '분석 설계', kind: 'specification', content: '분석 범위와 결과 형식', requestId: work.id,
     } }));
     assert.equal(design.requestId, work.id);
-    const task = value(await call('tars_api', { method: 'POST', path: '/api/tasks', body: { title: '분석 작업', departmentId: department.id, assigneeId: worker.id } }));
+    const task = value(await call('tars_api', { method: 'POST', path: '/api/tasks', body: { title: '분석 작업', departmentId: department.id, assigneeId: worker.id, goalId: 'analysis', plannedUnits: 1, acceptance: '원인과 근거 확인' } }));
     assert.equal(task.status, 'assigned');
     assert.equal(task.requestId, work.id);
     assert.equal(task.createdBy, '00000000-0000-4000-8000-000000000001');
@@ -146,13 +147,17 @@ test('MCP registers real agents through the API and preserves validation, genera
     assert.equal(revised.revisions.length, 2);
     assert.match(await readFile(join(directory, 'shared', 'instructions.md'), 'utf8'), /테스트 추가 규칙/);
     const profile = await readFile(join(directory, 'departments', department.id, 'members', atlas.id, 'instructions.md'), 'utf8');
-    assert.match(profile, /구현, 실행/);
+    assert.match(profile, /구현은 팀원에게 배정/);
     assert.doesNotMatch(profile, /수정하지 않습니다/);
     const proposal = value(await call('tars_api', { method: 'POST', path: `/api/requests/${work.id}/proposal`, body: {} }));
     assert.equal(proposal.status, 'pending');
     const responsePath = `/api/requests/${work.id}/approvals/${proposal.id}/respond`;
     const aiApproval = await call('tars_api', { method: 'POST', path: responsePath, body: { decision: 'approve' } });
     assert.equal(aiApproval.isError, true);
+    const modeChange = await call('tars_api', { method: 'PATCH', path: '/api/settings', body: { agentPermissionMode: 'automatic' } });
+    assert.equal(modeChange.isError, true, 'agents cannot disable user approval for later sessions');
+    const integrateWithoutReview = await call('tars_api', { method: 'POST', path: '/api/tasks/unknown/integrate', body: {} });
+    assert.equal(integrateWithoutReview.isError, true, 'the legacy integration route cannot bypass user review');
     const whileRunning = await fetch(`${base}${responsePath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'approve' }) });
     assert.equal(whileRunning.status, 409);
     // Hold scheduling in this isolated server so no real provider can be launched.
@@ -185,7 +190,7 @@ test('MCP registers real agents through the API and preserves validation, genera
   }
 });
 
-test('App Server grants command, file and requested network permissions without treating missing input as approval', { timeout: 10000 }, async () => {
+test('App Server keeps incoming requests pending until the host responds and preserves each request ID', { timeout: 10000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tars-approval-rpc-'));
   const binary = join(directory, 'fake-app-server.mjs');
   await writeFile(binary, `#!${process.execPath}
@@ -203,17 +208,25 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 `, { mode: 0o700 });
   const requests = [];
+  const resolveRequests = [];
   const rpc = appServerTransport(binary, { cwd: directory, processToken: 'test', onSpawn() {}, onNotification() {}, onFailure() {},
-    onRequest: (method, params, granted) => requests.push({ method, granted }) });
+    onRequest: (method, params, requestId) => new Promise(resolve => { requests.push({ method, requestId }); resolveRequests.push(resolve); }) });
   try {
     await rpc.call('initialize', {});
     for (let i = 0; i < 50 && requests.length < 4; i++) await delay(20);
+    assert.deepEqual(await rpc.call('test/replies', {}), []);
+    resolveRequests[0]({ decision: 'accept' });
+    resolveRequests[1]({ decision: 'decline' });
+    resolveRequests[2]({ permissions: {}, scope: 'turn' });
+    resolveRequests[3]({ answers: { q: { answers: ['user selection'] } } });
+    await delay(30);
     const replies = await rpc.call('test/replies', {});
-    assert.equal(replies[0].result.decision, 'acceptForSession');
-    assert.equal(replies[1].result.decision, 'acceptForSession');
-    assert.deepEqual(replies[2].result, { permissions: { network: { enabled: true } }, scope: 'session' });
-    assert.equal(replies[3].error.code, -32601);
-    assert.deepEqual(requests.map(item => item.granted), [true, true, true, false]);
+    assert.deepEqual(replies.map(item => item.id), [100, 101, 102, 103]);
+    assert.equal(replies[0].result.decision, 'accept');
+    assert.equal(replies[1].result.decision, 'decline');
+    assert.deepEqual(replies[2].result, { permissions: {}, scope: 'turn' });
+    assert.deepEqual(replies[3].result.answers.q.answers, ['user selection']);
+
   } finally { await rpc.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

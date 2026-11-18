@@ -28,8 +28,10 @@
 .execution-attempts strong { font-size: 11px; overflow-wrap: anywhere; }
 .execution-attempts small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .monitor-timing .activity-stale { color: var(--danger, #ef777b); }
-.request-list { margin: 18px 0; padding: 16px; border: 1px solid var(--line); border-radius: 5px; }
-.request-list > h2 { font-size: 14px; margin-bottom: 12px; }
+.kanban-card { position: relative; }
+.kanban-card .task-card-top { padding-right: 27px; }
+.kanban-card .task-card-delete { position: absolute; top: 7px; right: 7px; }
+.kanban-card .task-card-delete:hover:not(:disabled) { color: var(--danger); background: var(--danger-bg); }
 .request-record { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .request-record summary { cursor: pointer; font-size: 12px; line-height: 1.8; }
 .request-record .markdown { margin-top: 12px; }

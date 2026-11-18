@@ -84,7 +84,7 @@ test('the inherited project is used to validate linked work', () => fixture(({ s
   assert.throws(() => orchestrator.consult({ leaderId: leader.id, prompt: '다른 업무', requestId: unrelated.id }), /프로젝트/);
 }));
 
-test('department APIs validate assignments and preserve them across updates and server restarts', { timeout: 20000 }, async () => {
+test('department APIs validate assignments and preserve them across updates and server restarts', { timeout: 60000 }, async () => {
   const socket = createServer();
   socket.listen(0, '127.0.0.1');
   await once(socket, 'listening');
@@ -97,7 +97,9 @@ test('department APIs validate assignments and preserve them across updates and 
     let logs = '';
     server = spawn(process.execPath, ['backend/src/server.js'], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
     for (const stream of [server.stdout, server.stderr]) stream.on('data', data => { logs = (logs + data).slice(-6000); });
-    for (let attempt = 0; attempt < 80; attempt++) {
+    // Module loading and initial guidance generation can exceed four seconds
+    // while the full SQLite/integration suite is running in parallel.
+    for (let attempt = 0; attempt < 400; attempt++) {
       try { if ((await fetch(`${base}/health`)).ok) return; } catch { /* Startup. */ }
       if (server.exitCode !== null) break;
       await delay(50);

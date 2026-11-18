@@ -1,3 +1,7 @@
+import { EventEmitter } from 'node:events';
+import { basename } from 'node:path';
+export const terminalEvents = new EventEmitter();
+terminalEvents.setMaxListeners(200);
 import { appendFile, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DATA } from './store.js';
@@ -18,14 +22,14 @@ export function createTerminalRecorder(directory) {
   function write(kind, value) {
     if (capped || !value) return;
     const raw = clean(value);
-    const body = raw.length > 12000 ? `${raw.slice(0, 12000)}\n[… 긴 출력 생략]` : raw;
+    const body = raw;
     let line = `${new Date().toISOString()} [${kind}] ${body}\n`;
-    if (bytes + Buffer.byteLength(line) > 2 * 1024 * 1024) {
+    if (bytes + Buffer.byteLength(line) > 64 * 1024 * 1024) {
       capped = true;
-      line = `${new Date().toISOString()} [SYSTEM] 터미널 기록 한도 2 MiB에 도달했습니다. 이후 출력은 생략합니다.\n`;
+      line = `${new Date().toISOString()} [SYSTEM] 터미널 기록 한도 64 MiB에 도달했습니다. 이후 출력은 생략합니다.\n`;
     }
     bytes += Buffer.byteLength(line);
-    queue = queue.then(() => appendFile(file, line, { mode: 0o600 })).catch(() => {});
+    queue = queue.then(() => appendFile(file, line, { mode: 0o600 })).then(() => terminalEvents.emit(basename(directory))).catch(() => {});
   }
   function once(key, kind, value) {
     if (!value || seen.has(key)) return;
@@ -102,21 +106,30 @@ export function createTerminalRecorder(directory) {
   return { write, event, appServerEvent, flush: () => queue };
 }
 
-export async function readTerminal(session) {
+export async function readTerminal(session, { offset, before, limit = 48 * 1024 } = {}) {
   for (const name of ['terminal.log', 'activity.log']) {
     let file;
     try {
       file = await open(join(DATA, 'sessions', session.id, name), 'r');
       const { size } = await file.stat();
-      const limit = 48 * 1024;
-      const start = Math.max(0, size - limit);
-      const buffer = Buffer.alloc(Math.min(size, limit));
+      const end = Math.min(size, before ?? size);
+      let start = Math.min(end, offset ?? Math.max(0, end - limit));
+      const buffer = Buffer.alloc(Math.min(end - start, limit));
       const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
-      let content = buffer.subarray(0, bytesRead).toString('utf8');
-      if (start > 0) content = content.slice(content.indexOf('\n') + 1);
-      return { content: clean(content), truncated: start > 0, legacy: name === 'activity.log' };
+      let first = 0, last = bytesRead;
+      while (first < last && (buffer[first] & 0xc0) === 0x80) first++;
+      if (last && start + last < size) {
+        let lead = last - 1;
+        while (lead >= first && (buffer[lead] & 0xc0) === 0x80) lead--;
+        const byte = buffer[lead];
+        const length = byte < 0x80 ? 1 : byte < 0xe0 ? 2 : byte < 0xf0 ? 3 : 4;
+        if (lead + length > last) last = lead;
+      }
+      const content = buffer.subarray(first, last).toString('utf8');
+      return { content: clean(content), start: start + first, nextOffset: start + last, size,
+        truncated: start > 0, legacy: name === 'activity.log' };
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     finally { await file?.close(); }
   }
-  return { content: '', truncated: false, legacy: false };
+  return { content: '', start: 0, nextOffset: 0, size: 0, truncated: false, legacy: false };
 }

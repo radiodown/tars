@@ -1,0 +1,16 @@
+.conversation-picker label { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; }
+.conversation-picker select { flex: 1; min-width: 0; max-width: 100%; }
+.conversation-picker > button { flex-shrink: 0; }
+.conversation-page .member-chat { min-width: 0; }
+.conversation-start { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0; }
+.conversation-start > span { color: var(--muted); font-size: 12px; margin-right: 8px; }
+.conversation-list { display: grid; gap: 12px; }
+.conversation-card { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px; }
+.conversation-card > div { min-width: 0; }
+.conversation-card h2 { font-size: 15px; overflow-wrap: anywhere; margin: 0 0 8px; }
+.conversation-card p, .conversation-card small { color: var(--muted); font-size: 12px; }
+.conversation-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+@media (max-width: 767px) {
+  .conversation-card { flex-direction: column; align-items: stretch; }
+  .conversation-actions { justify-content: space-between; }
+}

@@ -1,19 +1,19 @@
+import { RecordBody } from './record-details';
 import { useState } from 'react';
 import { Download, History } from 'lucide-react';
 import { useWorkspace } from './App';
-import { time } from './api';
+import { time, workflowStages } from './api';
 import { Badge, Field, Markdown } from './ui';
 import { WorkApprovals } from './WorkApprovals';
 import './work-history.css';
 
 const decisions = { accepted: '검토 통과', rework: '보완 요청', blocked: '판단·해결 필요' };
-const stages = { task_review: '팀장 검토', request_report: '담당 관리자 최종 보고', request_escalation: '담당 관리자 차단 보고', user_followup: '사용자 응답 후속 처리' };
 const states = { queued: '대기', running: '진행 중', done: '처리 완료', blocked: '차단', cancelled: '중지', superseded: '새 결과로 대체' };
 
 export function WorkflowJobs({ jobs }) {
   const { fire, busy, open } = useWorkspace();
   return <div className="workflow-jobs">{jobs.map(job => <div key={job.id}>
-    <span>{stages[job.kind]} · {states[job.status]}</span>
+    <span>{workflowStages[job.kind]} · {states[job.status]}</span>
     {job.error && <p className="muted">{job.error}</p>}
     {job.sessionId && <button className="text-button" onClick={() => open('sessionDetail', { id: job.sessionId })}>실행 기록</button>}
     {['blocked', 'cancelled'].includes(job.status) && <button className="text-button" disabled={busy} onClick={() => fire(`/workflow-jobs/${job.id}/retry`, 'POST', {}, '후속 처리를 다시 예약했습니다.')}>다시 요청</button>}
@@ -33,13 +33,8 @@ export function RequestRecord({ requestId }) {
     <div className="request-tasks">{tasks.map(task => <button className="text-button" key={task.id} onClick={() => open('taskDetail', task)}>{task.title} <Badge status={task.status} /></button>)}</div>
     <WorkflowJobs jobs={jobs} />
     <WorkApprovals requestId={requestId} />
-    {document && <section><h4>{document.title}</h4><Markdown>{document.content}</Markdown></section>}
+    {document && <section><h4>{document.title}</h4><RecordBody kind="documents" record={document} /></section>}
   </details>;
-}
-
-export function RequestList({ tasks }) {
-  const ids = [...new Set(tasks.map(task => task.requestId).filter(Boolean))];
-  return ids.length ? <section className="request-list"><h2>업무별 결과</h2>{ids.map(id => <RequestRecord key={id} requestId={id} />)}</section> : null;
 }
 
 export function TaskResultVersions({ task }) {
@@ -73,7 +68,7 @@ export function TaskResultVersions({ task }) {
     {reports.length > 0 ? <>
       <Field label="결과 버전"><select value={report.id} onChange={event => setSelected(event.target.value)}>{reports.map(item => <option value={item.id} key={item.id}>v{item.version} · {time(item.recordedAt || item.createdAt)}{item.id === task.acceptedReportId ? ' · 채택됨' : ''}{item.legacy ? ' · 이전 기록' : ''}</option>)}</select></Field>
       <p className="muted">작성: {name(report.authorId)} · {report.id === task.acceptedReportId ? '채택된 결과' : '제출된 결과'}{report.sessionId && <> · <button className="text-button" onClick={() => open('sessionDetail', { id: report.sessionId })}>실행 상세</button></>}</p>
-      <Markdown>{report.content}</Markdown>
+      <RecordBody kind="taskReports" record={report} />
       <div className="task-review-result"><h4>{review ? decisions[review.decision] : '검토 기록 없음'}</h4>
         {review && <><p className="muted">검토: {name(review.authorId)} · {time(review.createdAt)}</p><Markdown>{review.rationale}</Markdown>
           <ul>{review.checks.map((check, index) => <li key={index}><strong>{report.criteria?.find(criterion => criterion.id === check.criterion)?.text || check.criterion} · {check.status === 'passed' ? '확인됨' : check.status === 'failed' ? '실패' : '미검증'}</strong><p>{check.evidence}</p></li>)}</ul>

@@ -125,7 +125,7 @@ export function readSessionActivity(store, sessionId) {
   const session = store.require('sessions', sessionId);
   const record = store.get('sessionActivities', sessionId) || { items: [], omitted: 0, diff: '', revision: 0 };
   // Recovery can end a session without receiving another provider event.
-  if (!['preparing', 'running', 'stopping'].includes(session.status)) {
+  if (!['preparing', 'running', 'waiting_input', 'stopping'].includes(session.status)) {
     const finalStatus = session.status === 'completed' ? 'incomplete' : session.status === 'failed' ? 'failed' : 'interrupted';
     return { ...record, current: '', items: record.items.map(item => item.status === 'running'
       ? { ...item, status: finalStatus, ...(item.steps ? { steps: item.steps.map(step => step.status === 'running' ? { ...step, status: finalStatus } : step) } : {}) } : item) };

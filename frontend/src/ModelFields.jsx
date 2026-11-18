@@ -16,6 +16,7 @@ const stars = [
 
 export function ModelFields({ initial = {} }) {
   const { data } = useWorkspace();
+  const [profiles, setProfiles] = useState(initial.sessionProfiles || {});
   const [provider, setProvider] = useState(initial.provider || 'codex');
   const [codexAccount, setCodexAccount] = useState(initial.codexAccount || 'codex');
   const [model, setModel] = useState(initial.model || '');
@@ -128,6 +129,14 @@ export function ModelFields({ initial = {} }) {
       </div>}
     </div>
     <p className={`model-effort-hint ${unsupported ? 'invalid' : ''}`} id={`${controlId}-hint`} role={unsupported ? 'alert' : undefined}>{settingError || (reasoning === 'default' ? 'CLI 기본 설정은 최저 추론 단계가 아닙니다. 모델명을 눌러 모델을 변경하세요.' : provider === 'claude' && unknown ? '이 모델의 지원 단계는 확인되지 않았습니다. 선택값은 실행 시 CLI 설정에 따라 적용됩니다.' : '슬라이더로 추론 깊이를 조절하고, 모델명을 눌러 모델을 변경하세요.')}</p>
+    <details className="session-profiles"><summary>작업 종류별 모델·추론 설정</summary><p className="muted">설정하지 않은 종류는 위 기본 프로필을 사용합니다.</p>
+      {Object.entries({ chat: '대화', plan: '협의·설계', work: '구현', review: '검토', report: '보고' }).map(([key, label]) => <div className="form-grid" key={key}>
+        <label><input type="checkbox" checked={Boolean(profiles[key])} onChange={event => setProfiles(current => { const next = { ...current }; if (event.target.checked) next[key] = { model, reasoning }; else delete next[key]; return next; })} />{label} 별도 설정</label>
+        {profiles[key] && <><Field label={`${label} 모델`}><input value={profiles[key].model} maxLength={100} placeholder="CLI 기본 모델" onChange={event => setProfiles(current => ({ ...current, [key]: { ...current[key], model: event.target.value } }))} /></Field>
+          <Field label={`${label} 추론`}><select value={profiles[key].reasoning} onChange={event => setProfiles(current => ({ ...current, [key]: { ...current[key], reasoning: event.target.value } }))}>{Object.entries(effortLabels).map(([value, title]) => <option value={value} key={value}>{title}</option>)}</select></Field></>}
+      </div>)}
+      <input type="hidden" name="sessionProfiles" value={JSON.stringify(profiles)} />
+    </details>
     <input type="hidden" name="reasoning" value={reasoning} />
     {custom ? <Field label="모델 ID"><input ref={customInput} name="model" value={model} onChange={event => setModel(event.target.value)} required maxLength={100} pattern=".*\S.*" placeholder="사용할 모델의 정확한 ID" /></Field>
       : <input type="hidden" name="model" value={model} />}

@@ -12,6 +12,7 @@ const { Orchestrator } = await import('../src/orchestrator.js');
 const { CEO_ID } = await import('../src/ceo.js');
 const { guidanceFilesHash } = await import('../src/guidance.js');
 const { memberHistory } = await import('../src/member-conversations.js');
+const { createConversation, migrateConversations } = await import('../src/conversations.js');
 after(() => rmSync(directory, { recursive: true, force: true }));
 
 async function fixture(run, provider = 'codex') {
@@ -47,84 +48,150 @@ async function fixture(run, provider = 'codex') {
   finally { await orchestrator.shutdown(); store.db.close(); }
 }
 
-test('CEO, leader and worker each continue one provider thread without creating work', () => fixture(async ({ store, ceo, leader, worker, chat }) => {
+test('each AI continues an explicitly selected session across multiple turns', () => fixture(async ({ store, ceo, leader, worker, chat }) => {
   const threads = [];
   for (const member of [ceo, leader, worker]) {
     const first = await chat(member, '첫 질문');
-    const second = await chat(member, '후속 질문');
+    const second = await chat(member, '후속 질문', { conversationId: first.conversationId });
     assert.equal(first.conversationId, second.conversationId);
     assert.equal(second.resumeThreadId, first.providerSessionId);
     assert.equal(second.providerSessionId, first.providerSessionId);
-    assert.notEqual(second.id, first.id); // Retain both execution records in the same conversation.
-    assert.equal(memberHistory(store, member.id).length, 2);
+    assert.notEqual(second.id, first.id);
+    assert.equal(memberHistory(store, member.id, null, first.conversationId).length, 2);
+    assert.equal(store.get('conversations', first.conversationId).providerSessionId, first.providerSessionId);
     threads.push(first.providerSessionId);
   }
   assert.equal(new Set(threads).size, 3);
   assert.equal(store.list('requests').length, 0);
 }));
 
-test('registered work, interleaved task results and a server object restart do not split the chat', () => fixture(async ({ store, orchestrator, leader, calls, chat }) => {
+test('two sessions of one AI retain independent native context when resumed alternately', () => fixture(async ({ store, worker, chat, calls }) => {
+  const a = await chat(worker, 'SESSION_A_PRIVATE_CONTEXT');
+  const b = await chat(worker, 'SESSION_B_PRIVATE_CONTEXT');
+  assert.notEqual(a.conversationId, b.conversationId);
+  assert.notEqual(a.providerSessionId, b.providerSessionId);
+  assert(!calls.at(-1).prompt.includes('SESSION_A_PRIVATE_CONTEXT'));
+  const a2 = await chat(worker, 'A 계속', { conversationId: a.conversationId });
+  assert.equal(a2.providerSessionId, a.providerSessionId);
+  const aHistory = await readFile(join(directory, 'conversations', `${a.conversationId}.md`), 'utf8');
+  assert(aHistory.includes('SESSION_A_PRIVATE_CONTEXT'));
+  assert(!aHistory.includes('SESSION_B_PRIVATE_CONTEXT'));
+  assert(!aHistory.includes(a.processToken));
+  const b2 = await chat(worker, 'B 계속', { conversationId: b.conversationId });
+  assert.equal(b2.providerSessionId, b.providerSessionId);
+  assert.equal(store.list('conversations').length, 2);
+}));
+
+test('registration and server restart preserve the chosen session without importing unrelated work', () => fixture(async ({ store, orchestrator, leader, calls, chat }) => {
   const first = await chat(leader);
   store.patch('sessions', first.id, { requestId: id() });
-  const task = store.put('sessions', { memberId: leader.id, kind: 'task_review', projectId: null,
-    status: 'completed', prompt: '검토 요청', output: '중간 작업 결과', startedAt: now() });
-  const restart = new Orchestrator(store, { launchRun: orchestrator.launchRun });
-  const next = restart.memberChat(leader.id, { prompt: '방금 검토 결과를 설명해줘' });
-  await restart.active.get(next.id).promise;
-  await restart.shutdown();
-  assert.equal(store.get('sessions', next.id).resumeThreadId, first.providerSessionId);
-  assert.match(calls.at(-1).prompt, /중간 작업 결과/);
-  const history = await readFile(join(directory, 'conversations', `${leader.id}.md`), 'utf8');
-  assert(history.includes(task.id));
-  assert(!history.includes(first.processToken));
+  const unrelated = store.put('sessions', { memberId: leader.id, kind: 'task_review', projectId: null,
+    status: 'completed', prompt: '검토 요청', output: 'UNRELATED_REVIEW_OUTPUT', startedAt: now() });
+  const reopened = new Store();
+  const restart = new Orchestrator(reopened, { launchRun: orchestrator.launchRun });
+  try {
+    const next = restart.memberChat(leader.id, { prompt: '계속', conversationId: first.conversationId });
+    await restart.active.get(next.id).promise;
+    assert.equal(reopened.get('sessions', next.id).resumeThreadId, first.providerSessionId);
+    assert(!calls.at(-1).prompt.includes('UNRELATED_REVIEW_OUTPUT'));
+    const history = await readFile(join(directory, 'conversations', `${first.conversationId}.md`), 'utf8');
+    assert(!history.includes(unrelated.id));
+    assert(!history.includes(first.processToken));
+  } finally { await restart.shutdown(); reopened.db.close(); }
 }));
 
-test('changed model and a failed latest turn start fresh context without selecting an older thread', () => fixture(async ({ store, worker, chat, calls }) => {
+for (const provider of ['codex', 'claude']) test(`${provider}: changed model, instructions and interrupted turns keep the selected native session`, () => fixture(async ({ store, worker, chat }) => {
   const first = await chat(worker);
-  store.patch('members', worker.id, { model: 'changed-model' });
-  const changed = await chat(worker);
-  assert.equal(changed.resumeThreadId, null);
-  assert.notEqual(changed.providerSessionId, first.providerSessionId);
-  store.patch('sessions', changed.id, { status: 'failed', progress: '실패 기록' });
-  const recovered = await chat(worker);
-  assert.equal(recovered.resumeThreadId, null);
-  assert.match(calls.at(-1).prompt, /실패 기록/);
-}));
+  store.patch('members', worker.id, { model: 'changed-model', reasoning: 'high', instructions: 'UPDATED_INSTRUCTION' });
+  const changed = await chat(worker, '설정 변경 후 계속', { conversationId: first.conversationId });
+  assert.equal(changed.providerSessionId, first.providerSessionId);
+  store.patch('sessions', changed.id, { status: 'interrupted', progress: '실패 기록' });
+  const resumed = await chat(worker, '실제 상태 확인 후 계속', { conversationId: first.conversationId });
+  assert.equal(resumed.providerSessionId, first.providerSessionId);
+  assert.equal(resumed[provider === 'codex' ? 'resumeThreadId' : 'resumeClaudeId'], first.providerSessionId);
+}, provider));
 
-test('Claude direct messages also reuse their own provider session', () => fixture(async ({ worker, chat }) => {
-  const first = await chat(worker);
-  const second = await chat(worker);
-  assert.equal(second.resumeClaudeId, first.providerSessionId);
-  assert.equal(second.providerSessionId, first.providerSessionId);
-}, 'claude'));
-
-test('history retains legacy executions across projects and context resets, excluding other AIs', () => fixture(async ({ store, orchestrator, leader, worker, chat, calls }) => {
-  store.put('sessions', { memberId: leader.id, kind: 'plan', status: 'completed', projectId: id(),
-    conversationId: 'old-project-chat', prompt: '이전 협의', output: '오래된 합의', startedAt: now() });
-  store.put('sessions', { memberId: worker.id, kind: 'work', status: 'completed', output: '다른 AI만의 대화', startedAt: now() });
-  const first = await chat(leader);
-  orchestrator.resetMemberChat(leader.id);
-  const next = await chat(leader);
+test('new session command preserves previous sessions and starts with empty history', () => fixture(async ({ store, orchestrator, leader, worker, chat, calls }) => {
+  const first = await chat(leader, 'OLD_SESSION_SECRET');
+  await chat(worker, 'OTHER_AI_SECRET');
+  const created = orchestrator.resetMemberChat(leader.id);
+  const next = await chat(leader, '새 질문', { conversationId: created.id });
   assert.notEqual(first.conversationId, next.conversationId);
   assert(!next.resumeThreadId);
-  assert.equal(memberHistory(store, leader.id).length, 3);
-  assert(!calls.at(-1).prompt.includes('오래된 합의'));
-  assert(!calls.at(-1).prompt.includes(first.output));
-  assert(!calls.at(-1).prompt.includes('다른 AI만의 대화'));
-  const context = await readFile(join(directory, 'conversations', `${leader.id}.md`), 'utf8');
+  assert(!calls.at(-1).prompt.includes('OLD_SESSION_SECRET'));
+  assert(!calls.at(-1).prompt.includes('OTHER_AI_SECRET'));
+  const context = await readFile(join(directory, 'conversations', `${next.conversationId}.md`), 'utf8');
   assert(!context.includes(first.id));
-  const followup = await chat(leader);
-  assert.equal(followup.resumeThreadId, next.providerSessionId);
-  const updatedContext = await readFile(join(directory, 'conversations', `${leader.id}.md`), 'utf8');
-  assert(updatedContext.includes(next.id));
-  assert(!updatedContext.includes(first.id));
+  assert(store.get('conversations', first.conversationId));
+  const resumed = await chat(leader, '이전 대화로 복귀', { conversationId: first.conversationId });
+  assert.equal(resumed.providerSessionId, first.providerSessionId);
 }));
 
-test('a busy AI rejects another send without creating an extra execution', () => fixture(async ({ store, orchestrator, worker }) => {
+test('queued messages remain bound to their original session even when another session is selected', () => fixture(async ({ store, orchestrator, worker, chat, calls }) => {
+  const first = await chat(worker, '첫 세션');
+  const second = await chat(worker, '둘째 세션');
+  const originalRun = orchestrator.run;
   orchestrator.run = async () => {};
-  orchestrator.memberChat(worker.id, { prompt: '첫 질문' });
-  assert.throws(() => orchestrator.memberChat(worker.id, { prompt: '중복 요청' }), /이미 작업 중/);
+  const held = orchestrator.memberChat(worker.id, { prompt: '처리 중', conversationId: first.conversationId });
+  const queued = orchestrator.memberChat(worker.id, { prompt: '둘째 세션 후속', conversationId: second.conversationId });
+  assert.equal(queued.status, 'queued');
+  assert.equal(queued.conversationId, second.conversationId);
   assert.throws(() => orchestrator.resetMemberChat(worker.id), /진행 중인 작업/);
-  assert.equal(memberHistory(store, worker.id).length, 1);
-  orchestrator.active.clear();
+  store.patch('sessions', held.id, { status: 'completed' });
+  store.patch('members', worker.id, { status: 'idle' });
+  orchestrator.active.clear(); orchestrator.run = originalRun;
+  await orchestrator.pump();
+  await Promise.all([...orchestrator.active.values()].map(run => run.promise));
+  const delivered = store.get('chatQueue', queued.id);
+  assert.equal(delivered.status, 'sent');
+  assert.equal(store.get('sessions', delivered.sessionId).conversationId, second.conversationId);
+  assert.equal(calls.at(-1).session.resumeThreadId, second.providerSessionId);
+}));
+
+test('wrong AI, account or project cannot resume a session or create an accidental execution', () => fixture(async ({ store, orchestrator, ceo, worker, chat }) => {
+  const first = await chat(worker);
+  const count = store.list('sessions').length;
+  assert.throws(() => orchestrator.memberChat(ceo.id, { prompt: 'invalid', conversationId: first.conversationId }), /다른 AI/);
+  store.patch('members', worker.id, { codexAccount: 'codex2' });
+  assert.throws(() => orchestrator.memberChat(worker.id, { prompt: 'invalid', conversationId: first.conversationId }), /원래 제공사와 계정/);
+  const executive = await chat(ceo);
+  assert.throws(() => orchestrator.memberChat(ceo.id, { prompt: 'invalid', conversationId: executive.conversationId, projectId: id() }), /프로젝트/);
+  assert.equal(store.list('sessions').length, count + 1);
+}));
+
+test('native resume errors are recorded without silently starting a fresh provider session', () => fixture(async ({ store, orchestrator, worker, chat }) => {
+  const first = await chat(worker);
+  let attempts = 0;
+  orchestrator.launchRun = async ({ session }) => {
+    attempts++;
+    assert.equal(session.resumeThreadId, first.providerSessionId);
+    throw new Error('native thread missing');
+  };
+  const next = orchestrator.memberChat(worker.id, { prompt: '재개', conversationId: first.conversationId });
+  await orchestrator.active.get(next.id).promise;
+  assert.equal(attempts, 1);
+  assert.equal(store.get('sessions', next.id).status, 'failed');
+  assert.match(store.get('sessions', next.id).progress, /native thread missing/);
+  assert.equal(store.get('conversations', first.conversationId).providerSessionId, first.providerSessionId);
+  assert.equal(store.list('conversations').length, 1);
+}));
+
+test('migration groups native identity, separates former AI-wide contexts and is idempotent', () => fixture(async ({ store, worker }) => {
+  const seed = (nativeId, extra = {}) => store.put('sessions', { memberId: worker.id, provider: 'codex', codexAccount: 'codex',
+    projectId: null, conversationId: worker.id, providerSessionId: nativeId, workspace: '/same/path', kind: 'member_chat',
+    status: 'completed', output: '보존할 결과', startedAt: now(), ...extra });
+  const a = seed('native-a'), a2 = seed('native-a'), b = seed('native-b');
+  const otherAccount = seed('native-a', { codexAccount: 'codex2' });
+  const request = store.put('requests', { sourceSessionId: a.id, conversationId: worker.id });
+  const queue = store.put('chatQueue', { memberId: worker.id, conversationId: worker.id, status: 'queued' });
+  migrateConversations(store);
+  const ca = store.get('sessions', a.id).conversationId;
+  assert.equal(store.get('sessions', a2.id).conversationId, ca);
+  assert.notEqual(store.get('sessions', b.id).conversationId, ca);
+  assert.notEqual(store.get('sessions', otherAccount.id).conversationId, ca);
+  assert.equal(store.get('sessions', a.id).output, a.output);
+  assert.equal(store.get('requests', request.id).conversationId, ca);
+  assert(store.get('conversations', store.get('chatQueue', queue.id).conversationId));
+  const before = store.snapshot(); migrateConversations(store);
+  assert.deepEqual(store.snapshot(), before);
 }));

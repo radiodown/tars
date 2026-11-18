@@ -238,7 +238,17 @@ test('Claude launch resumes the specified provider session instead of the latest
   const { launch } = await import('../src/providers.js');
   const binary = join(directory, 'fake-claude.mjs');
   const argsPath = join(directory, 'claude-args.json');
-  await writeFile(binary, `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));\nprocess.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({type:'result', result:'후속 응답', session_id:'original-claude'})+'\\n'));\n`, { mode: 0o700 });
+  await writeFile(binary, `#!${process.execPath}
+import { writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2).flatMap(arg => arg.startsWith('--') && arg.includes('=') ? [arg.slice(0,arg.indexOf('=')), arg.slice(arg.indexOf('=')+1)] : [arg])));
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+for await (const line of createInterface({ input: process.stdin })) {
+ const message = JSON.parse(line);
+ if (message.type === 'control_request') send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: { commands: [], models: [] } } });
+ if (message.type === 'user') send({ type: 'result', subtype: 'success', result: '후속 응답', session_id: 'original-claude' });
+}
+`, { mode: 0o700 });
   const previous = process.env.TARS_CLAUDE_BIN;
   process.env.TARS_CLAUDE_BIN = binary;
   try {
@@ -254,6 +264,7 @@ test('Claude launch resumes the specified provider session instead of the latest
 });
 
 test('consultation -> registration -> approval -> execution -> review -> owner report -> acceptance', () => fixture(async ({ store, orchestrator, workflow, leader, worker, task, request, approval, doc, source }) => {
+  const progressPlan = { summary: '결과 파일 작성', goal: '결과 파일 1개 검토', goals: [{ id: 'file', title: '파일 작성', target: 1, unit: '개', weight: 100, acceptance: '파일 내용 확인' }] };
   for (const [kind, item] of [['tasks', task], ['requests', request], ['workApprovals', approval], ['documents', doc], ['sessions', source]]) store.delete(kind, item.id);
   const calls = [];
   orchestrator.launchRun = async ({ session, cwd, onSpawn, prompt }) => {
@@ -261,6 +272,10 @@ test('consultation -> registration -> approval -> execution -> review -> owner r
     assert(!prompt.includes(session.processToken), 'Claude token must not enter the model prompt');
     onSpawn(null);
     let structured;
+    if (session.kind === 'member_chat') {
+      const work = workflow.registerRequest({ title: '결과 파일 작성', instruction: '파일 작성 후 검토·보고', acceptance: '결과 파일 확인', progressPlan, projectId: null }, { actor: leader.id, session });
+      workflow.attachTask({ title: '파일 작성', description: 'result.txt 작성', acceptance: '결과 파일 확인', goalId: 'file', plannedUnits: 1, departmentId: leader.departmentId, projectId: null, assigneeId: worker.id, documentIds: [], dependsOn: [], isolation: 'personal' }, leader.id, work.id, session.id);
+    }
     if (session.kind === 'plan') structured = { summary: '협의안', agreement: '파일 작성 범위', specification: '결과 파일로 검증',
       work: { title: '결과 파일 작성', instruction: '파일 작성 후 검토·보고', requestId: null },
       tasks: [{ title: '파일 작성', description: 'result.txt 작성', acceptance: '결과 파일 확인', assigneeId: worker.id, dependsOn: [] }] };
@@ -270,7 +285,7 @@ test('consultation -> registration -> approval -> execution -> review -> owner r
         verification: [{ criterion: '결과 파일 확인', status: 'passed', evidence: '파일 내용 확인' }], remaining: [], followUp: [] };
     }
     if (session.kind === 'task_review') structured = { decision: 'accepted', rationale: '파일 확인',
-      checks: [{ criterion: 'C1', status: 'passed', evidence: 'verified 확인' }], reworkInstructions: '', knowledge: [] };
+      checks: [{ criterion: 'C1', status: 'passed', evidence: '1개 파일 검증' }, { criterion: 'C2', status: 'passed', evidence: 'verified 확인' }], reworkInstructions: '', knowledge: [] };
     return { cancel() {}, promise: Promise.resolve({ output: structured ? JSON.stringify(structured) : '검토된 결과 보고', structured }) };
   };
   const settle = () => Promise.all([...orchestrator.active.values()].map(run => run.promise));
@@ -282,7 +297,7 @@ test('consultation -> registration -> approval -> execution -> review -> owner r
   assert.equal(calls.length, 1, 'No worker can launch before approval');
   workflow.approvals.respond(work.id, work.pendingApprovalId, { decision: 'approve' });
   for (let i = 0; i < 3; i++) { await orchestrator.pump(); await settle(); }
-  assert.deepEqual(calls.map(call => call.kind), ['plan', 'work', 'task_review', 'request_report']);
+  assert.deepEqual(calls.map(call => call.kind), ['member_chat', 'work', 'task_review', 'request_report']);
   assert.equal(calls.at(-1).memberId, leader.id);
   const finished = store.get('requests', work.id);
   assert.equal(finished.status, 'awaiting_acceptance');

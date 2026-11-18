@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { GUIDANCE_CONFIG } from './guidance.js';
-import { codexAccessConfig, permissionResponse } from './agent-access.js';
+import { codexAccessConfig } from './agent-access.js';
 
 // Execution transport: bounded frames and per-request deadlines, no lifetime deadline.
 // A lost mutation response is ambiguous; close the owned runtime instead of retrying it.
@@ -12,6 +12,7 @@ export function appServerTransport(binary, { cwd, processToken, onSpawn, onNotif
     env: { ...process.env, TARS_SESSION_TOKEN: processToken },
   });
   const pending = new Map();
+  const incoming = new Map();
   let nextId = 0, buffer = '', failure = null, closing = false;
   let resolveClosed;
   const closed = new Promise(resolve => { resolveClosed = resolve; });
@@ -21,6 +22,8 @@ export function appServerTransport(binary, { cwd, processToken, onSpawn, onNotif
     failure = error;
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error); }
     pending.clear();
+    for (const controller of incoming.values()) controller.abort();
+    incoming.clear();
     try { onFailure(error); } finally {
       child.stdin.destroy();
       const kill = signal => { try { if (child.pid) process.kill(-child.pid, signal); } catch { /* Already gone. */ } };
@@ -53,11 +56,19 @@ export function appServerTransport(binary, { cwd, processToken, onSpawn, onNotif
         if (!message || typeof message !== 'object') throw new Error('잘못된 RPC 메시지');
         if (message.method) {
           if (message.id != null) {
-            const grant = permissionResponse(message.method, message.params || {});
-            send(grant ? { id: message.id, result: grant }
-              : { id: message.id, error: { code: -32601, message: 'Tars does not support this server request' } });
-            onRequest(message.method, message.params || {}, Boolean(grant));
-          } else onNotification(message.method, message.params || {});
+            const controller = new AbortController();
+            if (incoming.has(message.id)) throw new Error('중복된 서버 요청 ID');
+            incoming.set(message.id, controller);
+            Promise.resolve().then(() => onRequest(message.method, message.params || {}, message.id, controller.signal)).then(result => {
+              if (result === undefined) throw new Error(`지원하지 않는 서버 요청: ${message.method}`);
+              if (!controller.signal.aborted) send({ id: message.id, result });
+            }).catch(error => {
+              if (!controller.signal.aborted && !failure) send({ id: message.id, error: { code: -32603, message: error.message } });
+            }).finally(() => incoming.delete(message.id));
+          } else {
+            if (message.method === 'serverRequest/resolved') incoming.get(message.params?.requestId)?.abort();
+            onNotification(message.method, message.params || {});
+          }
         } else {
           const request = pending.get(message.id);
           if (!request) continue;

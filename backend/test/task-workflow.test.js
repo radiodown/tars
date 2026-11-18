@@ -72,10 +72,12 @@ test('a failed enqueue rolls back the result and task transition together', () =
 
 test('acceptance preserves reviewer identity, adopted version and scoped reusable knowledge', () => fixture(async ({ store, workflow, task, leader, worker, start }) => {
   const session = start();
+  store.patch('tasks', task.id, { blocker: '검토 전 해결이 필요한 사항' });
   const report = await workflow.submit(session, result());
   await assert.rejects(workflow.review(task.id, report.id, verdict(), worker.id), /검토자/);
   const reviewed = await workflow.review(task.id, report.id, verdict(), leader.id);
   assert.equal(store.get('tasks', task.id).acceptedReportId, report.id);
+  assert.equal(store.get('tasks', task.id).blocker, null);
   assert.equal(reviewed.artifactHash, report.artifacts.hash);
   assert.equal(store.list('documents')[0].sourceReviewId, reviewed.id);
   assert.match(renderTaskRecord(store, task.id), /채택됨/);
@@ -278,5 +280,27 @@ test('full orchestrator advances worker -> review -> request report, with no liv
     assert.equal(await readFile(join(workspace, 'result.txt'), 'utf8'), '정상 결과');
     const context = await contextFor(store, store.get('members', task.assigneeId), null);
     assert.match(context, /검토된 지식/);
+  } finally { await orchestrator.shutdown(); }
+}));
+
+test('Claude rework resumes the original work session while retaining separate execution records', () => fixture(async ({ store, task }) => {
+  const calls = [];
+  const orchestrator = new Orchestrator(store, { launchRun: async ({ session, onSpawn }) => {
+    calls.push(session);
+    onSpawn(null);
+    return { cancel() {}, promise: Promise.resolve({ output: JSON.stringify(result()), structured: result(), providerSessionId: 'claude-work-context' }) };
+  } });
+  try {
+    orchestrator.queue(task.id);
+    await orchestrator.pump();
+    await Promise.all([...orchestrator.active.values()].map(run => run.promise));
+    await orchestrator.workflow.review(task.id, store.get('tasks', task.id).latestReportId, verdict('rework'), 'user');
+    await orchestrator.pump();
+    await Promise.all([...orchestrator.active.values()].map(run => run.promise));
+    assert.equal(calls.length, 2);
+    assert.notEqual(calls[0].id, calls[1].id);
+    assert.equal(calls[0].conversationId, calls[1].conversationId);
+    assert.equal(calls[1].resumeClaudeId, 'claude-work-context');
+    assert.equal(store.get('sessions', calls[1].id).status, 'completed');
   } finally { await orchestrator.shutdown(); }
 }));

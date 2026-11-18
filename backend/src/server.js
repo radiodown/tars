@@ -1,3 +1,8 @@
+import { registerReviewRoutes, terminalQuery } from './review-routes.js';
+import { registerConversationRoutes } from './conversation-routes.js';
+import { webState, summaryRecord } from './web-state.js';
+import { validateProgressAllocation } from './work-progress.js';
+import { changeReview, applyReviewedChanges } from './change-review.js';
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
@@ -5,22 +10,22 @@ import { join } from 'node:path';
 import { Store, DATA, now } from './store.js';
 import { deleteDepartment } from './departments.js';
 import { departmentSchema, memberSchema, projectSchema, documentSchema, taskSchema, taskReviewSchema, settingsSchema, consultationSchema, ceoSettingsSchema, ceoReportSchema, ceoChatSchema, codexAccountSchema, fail } from './contracts.js';
-import { isWorkRequest, sessionBelongsToRequest } from '../../shared/work-requests.mjs';
+import { isWorkRequest, sessionRelatesToWork } from '../../shared/work-requests.mjs';
 import { readTerminal } from './terminal.js';
 import { readSessionActivity } from './session-activity.js';
 import { teamActivitySnapshot, teamActivityQuerySchema } from './team-activity.js';
 import { taskWaitReason } from './execution-status.js';
 import { agentState, agentStateQuerySchema } from './agent-state.js';
 import { knowledgeTree, readKnowledgeFile } from './knowledge.js';
-import { syncShared, syncMember, projectPath, createPatch, integrate } from './workspaces.js';
+import { syncShared, syncMember, projectPath, createPatch } from './workspaces.js';
 import { providers } from './providers.js';
 import { accountUsage, closeAccountUsage } from './account-usage.js';
 import { modelCatalog, closeModelCatalog, validateModelSettings } from './model-catalog.js';
+import { chatSkills, closeChatSkills } from './chat-skills.js';
 import { Orchestrator } from './orchestrator.js';
 import { CEO_ID, ensureCeo, projectOverview } from './ceo.js';
 import { managementSnapshot, recordPath, renderTaskRecord } from './work-records.js';
 import { executionIdentity, assertTaskActor } from './agent-identity.js';
-import { assertCurrentArtifacts } from './task-artifacts.js';
 import { initializeDefaultInstructions, reviseDocument } from './guidance.js';
 import { allowedHosts, backendPort, bindHost } from '../../network.config.mjs';
 
@@ -29,6 +34,8 @@ const store = new Store();
 const orchestrator = new Orchestrator(store);
 const clients = new Set();
 const operations = new Set();
+registerReviewRoutes(app, store, orchestrator);
+registerConversationRoutes(app, store, orchestrator, operation);
 let ready = false;
 
 // Keep the browser Host through the Vite proxy so LAN requests remain same-origin.
@@ -42,6 +49,7 @@ app.addHook('onRequest', async request => {
   if (origin && origin !== target.origin) fail('허용되지 않은 요청 출처입니다.', 403);
   if (!ready && request.url.startsWith('/api/')) fail('작업 공간을 준비 중입니다.', 503);
   request.identity = executionIdentity(store, request.headers['x-tars-execution-token']);
+  if (request.method !== 'GET' && request.identity.session && store.get('members', request.identity.actor)?.role === 'member' && !['/api/execution/progress', '/api/execution/block', '/api/execution/ask'].includes(request.url)) fail('팀원은 자신의 진행 기록·질문·결과만 제출할 수 있습니다.', 403);
   if (request.method !== 'GET' && ['task_review', 'request_report', 'request_escalation'].includes(request.identity.session?.kind)) {
     fail('검토·보고 실행은 최종 결과 제출로 업무 상태를 갱신합니다.', 403);
   }
@@ -89,6 +97,8 @@ function validateTask(input, existingId = null) {
     if (seen.has(key)) return;
     seen.add(key);
     const dep = store.require('tasks', key);
+    if (dep.status !== 'done' && dep.deletedAt) fail('삭제된 미완료 작업은 선행 작업으로 지정할 수 없습니다.', 400);
+    if (dep.status !== 'done' && dep.requestId && store.get('requests', dep.requestId)?.deletedAt) fail('삭제된 업무의 미완료 작업은 선행 작업으로 지정할 수 없습니다.', 400);
     if (dep.departmentId !== input.departmentId || dep.projectId !== input.projectId) fail('선행 작업은 같은 부서와 프로젝트에 속해야 합니다.', 400);
     dep.dependsOn.forEach(next => visit(next, seen));
   };
@@ -107,7 +117,7 @@ app.get('/api/state', async () => {
     .map(request => ({ ...request, executionAllowed: orchestrator.workflow.approvals.canExecute(request.id),
       executionBlockReason: orchestrator.workflow.approvals.executionBlockReason(request.id) }));
   state.tasks = state.tasks.map(task => ({ ...task, waitReason: taskWaitReason(store, orchestrator.workflow.approvals, task) }));
-  return { ...state, providers: await providers(), ceoOverview: projectOverview(state) };
+  return { ...webState(state), providers: await providers(), ceoOverview: projectOverview(state) };
 });
 app.get('/api/agent-state', async request => agentState(store, agentStateQuerySchema.parse(request.query)));
 app.get('/api/knowledge/tree', async (request, reply) => {
@@ -135,6 +145,10 @@ app.get('/api/events', (request, reply) => {
   clients.add(reply.raw);
   const timer = setInterval(() => reply.raw.write(': heartbeat\n\n'), 15000);
   reply.raw.on('close', () => { clearInterval(timer); clients.delete(reply.raw); });
+});
+store.on('session-progress', sessionId => {
+  const value = summaryRecord('sessions', store.require('sessions', sessionId));
+  for (const client of clients) if (!client.destroyed) client.write(`event: session-progress\ndata: ${JSON.stringify(value)}\n\n`);
 });
 let updateTimer;
 store.on('change', () => {
@@ -216,6 +230,10 @@ app.patch('/api/documents/:id', async request => {
 });
 
 app.post('/api/requests', async request => orchestrator.workflow.registerRequest(request.body, request.identity));
+app.delete('/api/requests/:id', async request => {
+  if (request.identity.actor !== 'user') fail('업무는 사용자만 삭제할 수 있습니다.', 403);
+  return orchestrator.workflow.deleteRequest(request.params.id, orchestrator.active, operations);
+});
 app.post('/api/requests/:id/approvals/:approvalId/respond', async request =>
   orchestrator.workflow.approvals.respond(request.params.id, request.params.approvalId, request.body, request.identity.actor));
 app.post('/api/requests/:id/proposal', async request => {
@@ -236,6 +254,10 @@ app.post('/api/tasks', async request => {
   store.event(`작업 생성 · ${value.title}`, { taskId: value.id });
   return value;
 });
+app.delete('/api/tasks/:id', async request => {
+  if (request.identity.actor !== 'user') fail('작업 기록은 사용자만 삭제할 수 있습니다.', 403);
+  return orchestrator.workflow.deleteTask(request.params.id, orchestrator.active, operations);
+});
 app.patch('/api/tasks/:id', async request => {
   const task = store.require('tasks', request.params.id);
   assertTaskActor(store, task, request.identity, '수정');
@@ -246,8 +268,9 @@ app.patch('/api/tasks/:id', async request => {
   if ((task.projectId !== input.projectId || task.departmentId !== input.departmentId) && store.list('tasks').some(other => other.dependsOn.includes(task.id))) fail('다른 작업의 선행 작업입니다. 프로젝트나 소속 부서를 바꿀 수 없습니다.');
   validateTask(input, task.id);
   if (input.requestId !== task.requestId) fail('기존 작업의 원래 요청은 변경할 수 없습니다.');
+  if (task.requestId) validateProgressAllocation(store, store.require('requests', task.requestId), input, task.id);
   orchestrator.workflow.cancelJobs(task.id, '작업 지시가 변경되었습니다.', 'superseded');
-  return store.patch('tasks', task.id, { ...input, ...(task.status === 'review' ? { status: 'blocked', error: '작업 지시가 변경되었습니다. 다시 실행하세요.' } : {}) }, { actor: request.identity.actor });
+  return store.patch('tasks', task.id, { ...input, completedUnits: 0, ...(task.status === 'review' ? { status: 'blocked', error: '작업 지시가 변경되었습니다. 다시 실행하세요.' } : {}) }, { actor: request.identity.actor });
 });
 app.post('/api/tasks/:id/run', async request => {
   assertTaskActor(store, store.require('tasks', request.params.id), request.identity, '실행');
@@ -282,7 +305,10 @@ app.post('/api/workflow-jobs/:id/retry', async request => {
 app.post('/api/requests/:id/stop', async request => {
   if (request.identity.actor !== 'user') fail('요청 전체 중지는 사용자 요청으로 처리합니다.', 403);
   const value = orchestrator.workflow.pauseRequest(request.params.id);
-  for (const session of store.list('sessions').filter(item => sessionBelongsToRequest(item, value.id) && orchestrator.active.has(item.id))) orchestrator.stop(session.id);
+  const taskIds = new Set(store.list('tasks').filter(task => task.requestId === value.id).map(task => task.id));
+  for (const session of store.list('sessions')) {
+    if (orchestrator.active.has(session.id) && sessionRelatesToWork(session, value, taskIds)) orchestrator.stop(session.id);
+  }
   return value;
 });
 app.post('/api/requests/:id/resume', async request => {
@@ -297,16 +323,13 @@ app.get('/api/tasks/:id/patch', async (request, reply) => {
     return reply.type('text/plain; charset=utf-8').send(patch);
   });
 });
+// Keep the legacy route, with the same reviewed-version guard as the new UI.
 app.post('/api/tasks/:id/integrate', async request => {
+  if (request.identity.actor !== 'user') fail('변경 검토와 원본 반영은 사용자만 승인할 수 있습니다.', 403);
+  const expected = z.object({ hash: z.string().regex(/^[a-f0-9]{64}$/), reportId: z.string().min(1) }).strict().safeParse(request.body);
+  if (!expected.success) fail('파일 변경 검토에서 최신 패치와 결과 버전을 확인한 뒤 반영하세요.', 409);
   const task = store.require('tasks', request.params.id);
-  assertTaskActor(store, task, request.identity, '통합');
-  return operation(task.projectId, async () => {
-    if (!task.acceptedReportId) fail('검토된 결과 버전이 없습니다. 새 결과를 제출하고 검토하세요.');
-    await assertCurrentArtifacts(store, task, store.require('taskReports', task.acceptedReportId));
-    const result = await integrate(store, task);
-    store.event(`원본에 변경 적용 · ${task.title}`, { taskId: task.id });
-    return store.patch('tasks', task.id, { ...result, integratedAt: now() }, { actor: request.identity.actor });
-  });
+  return operation(task.projectId, () => applyReviewedChanges(store, task.id, expected.data, request.identity.actor));
 });
 app.post('/api/consult', async request => orchestrator.consult(consultationSchema.parse(request.body), request.identity));
 app.post('/api/report', async request => orchestrator.report(consultationSchema.parse(request.body)));
@@ -328,10 +351,24 @@ app.post('/api/ceo/chat/clear', async request => operation(CEO_ID, async () => o
 app.post('/api/members/:id/chat', async request => operation(request.params.id,
   async () => orchestrator.memberChat(request.params.id, ceoChatSchema.parse(request.body))));
 app.post('/api/members/:id/chat/clear', async request => operation(request.params.id,
-  async () => orchestrator.resetMemberChat(request.params.id)));
+  async () => orchestrator.resetMemberChat(request.params.id, ceoChatSchema.pick({ projectId: true }).parse(request.body))));
+app.post('/api/members/:id/chat/skills', async request => operation(request.params.id,
+  async () => chatSkills(store, request.params.id, ceoChatSchema.pick({ projectId: true }).extend({ sessionId: z.string().uuid().optional() }).parse(request.body))));
+app.post('/api/sessions/:id/interactions/:requestId/respond', async request =>
+  orchestrator.interactions.respond(request.params.id, request.params.requestId, request.body, request.identity.actor));
+app.get('/api/tasks/:id/change-review', async request => {
+  const task = store.require('tasks', request.params.id);
+  return operation(task.projectId, () => changeReview(store, task.id));
+});
+app.post('/api/tasks/:id/change-review/apply', async request => {
+  if (request.identity.actor !== 'user') fail('변경 검토와 원본 반영은 사용자만 승인할 수 있습니다.', 403);
+  const expected = z.object({ hash: z.string().regex(/^[a-f0-9]{64}$/), reportId: z.string().min(1) }).strict().parse(request.body);
+  const task = store.require('tasks', request.params.id);
+  return operation(task.projectId, () => applyReviewedChanges(store, task.id, expected, request.identity.actor));
+});
 app.get('/api/sessions/:id/terminal', async (request, reply) => {
   reply.header('Cache-Control', 'no-store');
-  return readTerminal(store.require('sessions', request.params.id));
+  return readTerminal(store.require('sessions', request.params.id), terminalQuery.parse(request.query));
 });
 app.post('/api/sessions/:id/stop', async request => {
   const session = store.require('sessions', request.params.id);
@@ -376,7 +413,11 @@ app.get('/api/sessions/:id/logs', async request => {
   try { return { content: (await readFile(join(DATA, 'sessions', session.id, 'activity.log'), 'utf8')).slice(-16000) }; }
   catch (error) { if (error.code === 'ENOENT') return { content: '아직 실행 로그가 없습니다.' }; throw error; }
 });
-app.patch('/api/settings', async request => store.patch('settings', 'main', settingsSchema.parse(request.body)));
+app.patch('/api/settings', async request => {
+  const input = settingsSchema.parse(request.body);
+  if (input.agentPermissionMode && request.identity.actor !== 'user') fail('실행 승인 모드는 사용자만 변경할 수 있습니다.', 403);
+  return store.patch('settings', 'main', input);
+});
 
 async function initialize() {
   initializeDefaultInstructions(store);
@@ -392,6 +433,7 @@ async function shutdown() {
   ready = false;
   closeAccountUsage();
   closeModelCatalog();
+  closeChatSkills();
   await orchestrator.shutdown();
   clearTimeout(updateTimer);
   for (const client of clients) client.end();

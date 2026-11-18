@@ -9,7 +9,7 @@ export const teamActivitySchema = z.object({ ...filters,
 export const teamActivityQuerySchema = z.object({ ...filters,
   limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).max(100000).default(0),
 }).strict();
-const live = session => ['preparing', 'running', 'stopping'].includes(session?.status);
+const live = session => ['preparing', 'running', 'waiting_input', 'stopping'].includes(session?.status);
 const timestamp = value => typeof value === 'string' ? Date.parse(value) : NaN;
 const index = values => new Map(values.map(value => [value.id, value]));
 

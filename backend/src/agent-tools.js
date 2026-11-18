@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { departmentSchema, memberSchema, workRequestSchema } from './contracts.js';
+import { departmentSchema, memberSchema, workRequestSchema, progressUpdateSchema } from './contracts.js';
 import { agentApiBase } from './agent-access.js';
 import { teamActivitySchema, teamActivityFromState } from './team-activity.js';
 import { agentStateSchema, agentStateFromState } from './agent-state.js';
@@ -12,18 +12,22 @@ const requestSchema = z.object({
   body: z.record(z.string(), z.unknown()).optional().describe('JSON request body; omitted for GET'),
   executionToken,
 }).strict();
+const progressSchema = progressUpdateSchema.extend({ executionToken });
 const definitions = [
+  { name: 'tars_log_progress', description: 'Worker: persist completed work, evidence and next steps on the current task. For planned tasks include completedUnits: cumulative integer count within plannedUnits, not a percentage. Report honestly and correct downward if needed. This is reported progress, not verified completion; independent review determines achievement. Survives failure.', schema: progressSchema, method: 'POST', path: '/api/execution/progress' },
+  { name: 'tars_block', description: 'Worker: persist an external blocker. Include remaining work in the final structured result.', schema: progressSchema, method: 'POST', path: '/api/execution/block' },
+  { name: 'tars_ask', description: 'Ask the user and wait for the answer in this execution. Do not poll or cancel while waiting.', schema: z.object({ question: z.string().trim().min(1).max(6000), options: z.array(z.string().max(500)).max(12).optional(), executionToken }).strict(), method: 'POST', path: '/api/execution/ask' },
   { name: 'tars_get_team_activity', description: 'Read a compact, current team activity snapshot: who is doing what, original instruction, latest public progress, session/task/work states, heartbeat freshness, blockers and pending approvals. Includes chats without registered work. Optional departmentId/projectId/memberId filters; limit/offset paginate members. Project filtering includes department staff and assigned work; their actual current project is shown even if different. Read-only; does not create work. Prefer this over full state for status questions.',
     schema: teamActivitySchema, method: 'GET', path: '/api/team-activity', readOnly: true, query: true },
   { name: 'tars_get_state', description: 'Read compact TARS lists, default 20 records per collection with totals and limit/offset pagination. Lists omit document bodies, session output and approval snapshots. Specify collection and id to read one complete record. Mutation responses already contain the saved record; query again only for missing details or uncertain results.',
     schema: agentStateSchema, method: 'GET', path: '/api/agent-state', readOnly: true, query: true },
-  { name: 'tars_register_work', description: 'A leader or CEO explicitly registers a business work item after discussing its goal and scope with the user. Provide a meaningful title, instruction (goal and scope), and projectId if applicable. Never register greetings, questions, or status lookups as work. For follow-up on an existing work item, provide its requestId to link this conversation without creating a duplicate. Use the returned ID as requestId for documents, delegated tasks and consultations. Registration enters consultation. Submit agreement/design documents and task drafts first; execution is blocked until the user approves that exact scope in the work UI.',
+  { name: 'tars_register_work', description: 'A leader or CEO explicitly registers a business work item after discussing its goal and scope with the user. New work requires title, instruction, acceptance and progressPlan: short summary, goal, and measurable goals with id/title/target/unit/weight/acceptance; weights sum to 100. Read the 업무 목표·진행률·UI 작성 규칙 instruction. Set projectId if applicable. Never register greetings, questions, or status lookups as work. For follow-up on an existing work item, provide its requestId to link this conversation without creating a duplicate. Use the returned ID as requestId for documents, delegated tasks and consultations. Registration enters consultation. Submit agreement/design documents and task drafts first; execution is blocked until the user approves that exact scope in the work UI.',
     schema: workRequestSchema.extend({ executionToken }), method: 'POST', path: '/api/requests' },
   { name: 'tars_create_department', description: 'Create a real TARS department and return its saved ID. Set projectId to assign its default source project, or null for no source project. Check current state first to reuse an existing department.',
     schema: departmentSchema.extend({ executionToken }), method: 'POST', path: '/api/departments' },
   { name: 'tars_create_member', description: 'Register a real TARS AI leader or member in a department. Required: name, departmentId, role (leader/member), provider (codex/claude). Set codexAccount, model, reasoning, specialty and instructions to the requested values. This persists the agent; it does not launch a task.',
     schema: memberSchema.extend({ executionToken }), method: 'POST', path: '/api/members' },
-  { name: 'tars_api', description: 'Call TARS management APIs with the current executionToken. GET /api/agent-state (compact lists; collection/id for details); POST /api/{requests,departments,members,projects,documents,tasks}; PATCH /api/{departments,members,documents,tasks}/<id>; PATCH /api/ceo or /api/settings; POST /api/tasks/<id>/{run,cancel,integrate}; POST /api/consult or /api/report with leaderId and prompt (omitted projectId uses the department default; an explicit projectId or null overrides it); POST /api/sessions/<id>/{stop,steer}; POST /api/requests/<id>/proposal to submit or resubmit the current agreement for user approval. The server automatically submits manager consultation results for approval at turn end. Only the user may respond to approvals. Document PATCH requires its current version. Task creation requires title and departmentId, and accepts description, acceptance, assigneeId, projectId, requestId, dependsOn, documentIds and isolation. Register work with tars_register_work first; tasks and work documents must reference its requestId. Consultations accept requestId to delegate within existing work. Chat messages are not work items. Workers submit structured final results; the server schedules a separate manager review and final TARS report. Only the manager or CEO assigns and starts tasks. Reviews and reports return their final response without mutating state through this API. Use saved mutation responses to verify writes; query details only when needed. Do not replay failed mutations.',
+  { name: 'tars_api', description: 'Call TARS management APIs with the current executionToken. GET /api/agent-state (compact lists; collection/id for details); POST /api/{requests,departments,members,projects,documents,tasks}; PATCH /api/{requests,departments,members,documents,tasks}/<id>; PATCH /api/ceo or /api/settings; POST /api/tasks/<id>/{run,cancel,integrate}; POST /api/consult or /api/report with leaderId and prompt (omitted projectId uses the department default; an explicit projectId or null overrides it); POST /api/sessions/<id>/{stop,steer}; POST /api/requests/<id>/proposal to submit or resubmit the current agreement for user approval. The server automatically submits manager consultation results for approval at turn end. Only the user may respond to approvals. Document PATCH requires its current version. Task creation requires title and departmentId; planned work also requires goalId, plannedUnits and acceptance. Allocated units cannot exceed the goal target. Update progressPlan through PATCH /api/requests/<id> and resubmit for approval when targets change. Task creation accepts description, acceptance, assigneeId, projectId, requestId, dependsOn, documentIds and isolation. Register work with tars_register_work first; tasks and work documents must reference its requestId. Consultations accept requestId to delegate within existing work. Chat messages are not work items. Workers submit structured final results; the server schedules a separate manager review and final TARS report. Only the manager or CEO assigns and starts tasks. Reviews and reports return their final response without mutating state through this API. Use saved mutation responses to verify writes; query details only when needed. Do not replay failed mutations.',
     schema: requestSchema },
 ];
 export const agentTools = definitions.map(({ name, description, schema, readOnly = false }) => ({
@@ -36,7 +40,7 @@ export async function callAgentTool(name, input) {
   if (!definition) throw new Error(`Unknown TARS tool: ${name}`);
   const args = definition.schema.parse(input ?? {});
   const { executionToken: suppliedToken, ...payload } = args;
-  const token = suppliedToken || process.env.TARS_EXECUTION_TOKEN;
+  const token = process.env.TARS_EXECUTION_TOKEN || suppliedToken;
   const { method, path, body } = definition.path
     ? { method: definition.method, path: definition.path, body: definition.method === 'GET' ? undefined : payload }
     : args;
@@ -47,9 +51,9 @@ export async function callAgentTool(name, input) {
   if (url.origin !== base.origin || !url.pathname.startsWith('/api/') || url.username || url.password) {
     throw new Error('Use a /api/ path on the configured TARS server.');
   }
-  if (url.pathname === '/api/events') throw new Error('Use /api/state for a snapshot; the event stream is not a request/response tool.');
+  if (url.pathname.endsWith('/stream') || url.pathname === '/api/events') throw new Error('Use /api/state for a snapshot; the event stream is not a request/response tool.');
   const response = await fetch(url, {
-    method, redirect: 'error', signal: AbortSignal.timeout(60_000),
+    method, redirect: 'error', signal: AbortSignal.timeout(name === 'tars_ask' ? 24 * 60 * 60_000 : 60_000),
     headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(token ? { 'X-Tars-Execution-Token': token } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });

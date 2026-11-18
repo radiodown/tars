@@ -1,0 +1,39 @@
+.projects-page .page-heading { align-items: center; }
+.projects-page .page-heading > .button { margin-top: 0; }
+
+.source-project-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.source-project-list > li + li { border-top: 1px solid var(--line); }
+.source-project-list > li:first-child .source-project { border-radius: 7px 7px 0 0; }
+.source-project-list > li:last-child .source-project { border-radius: 0 0 7px 7px; }
+.source-project-list > li:only-child .source-project { border-radius: 7px; }
+.source-project {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+  padding: 20px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+.source-project:hover { background: var(--raised); }
+.source-project:focus-visible { outline-offset: -3px; }
+.source-project-icon { margin-top: 3px; color: var(--muted); }
+.source-project-info { display: grid; gap: 6px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.source-project-info > strong { font-size: 14px; font-weight: 600; line-height: 1.6; }
+.source-project-description { font-size: 12px; line-height: 1.7; color: var(--muted); }
+.source-project-info > code { font-size: 11px; line-height: 1.7; color: var(--muted); }
+.source-project-edit { align-self: center; color: var(--muted); }
+
+@media (max-width: 767px) {
+  .source-project { padding: 16px; gap: 12px; }
+  .source-project-info > code { font-size: 12px; }
+}
